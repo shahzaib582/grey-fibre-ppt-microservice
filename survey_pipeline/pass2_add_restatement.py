@@ -28,6 +28,7 @@ from .utils import (
     generate_restatement,
     set_shape_text_to_single_paragraph,
     replace_placeholder_in_shape,
+    ensure_key_finding_style,
 )
 from .data_loader import load_ai_long
 
@@ -57,6 +58,21 @@ def find_values_shape(slide):
             return shape, "values"
 
     return None, None
+
+
+def find_question_shape(slide):
+    """
+    Find the shape that contains the question text (e.g. 'Question 6:' line).
+    Used as the style source for key-finding text.
+    """
+    pattern = re.compile(r"\\bQuestion[s]?\\s+\\d+\\s*:", re.IGNORECASE)
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text = shape.text_frame.text
+        if pattern.search(text):
+            return shape
+    return None
 
 
 def prepend_restatement_to_shape(shape, restatement: str):
@@ -118,7 +134,7 @@ def prepend_restatement_to_shape(shape, restatement: str):
     return True
 
 
-def process_slide(slide, ai_long, top_k=3, exclude_net=True):
+def process_slide(slide, ai_long, key_style, top_k=3, exclude_net=True):
     """Process a single slide: generate and set AI restatement (sentence only)."""
     slide_text = get_slide_text(slide)
 
@@ -134,6 +150,9 @@ def process_slide(slide, ai_long, top_k=3, exclude_net=True):
     target_shape, mode = find_values_shape(slide)
     if target_shape is None:
         return False
+
+    # Find the question text shape to use as style source
+    question_shape = find_question_shape(slide)
 
     # Get data for building bullet list for LLM
     all_rows = select_top_rows_multi(ai_long, qids, top_k=top_k, exclude_net=exclude_net)
@@ -156,11 +175,13 @@ def process_slide(slide, ai_long, top_k=3, exclude_net=True):
         return False
 
     if mode == "placeholder":
-        # If placeholder still exists, replace it with restatement only (sentence, no raw stats)
+        # If placeholder still exists, replace it with restatement only (sentence, no raw stats).
+        # replace_placeholder_in_shape already preserves the placeholder's font and color.
         return replace_placeholder_in_shape(target_shape, restatement)
     else:
-        # Replace entire content with restatement sentence only (no raw stats)
-        return set_shape_text_to_single_paragraph(target_shape, restatement)
+        # Replace entire content with restatement sentence only (no raw stats),
+        # and force the run to use the key-finding style we captured from the template.
+        return set_shape_text_to_single_paragraph(target_shape, restatement, style=key_style)
 
 
 def main():
@@ -187,6 +208,8 @@ def main():
     ai_long = load_ai_long(args.data)
     prs = Presentation(args.pptx)
 
+    key_style = ensure_key_finding_style(prs)
+
     updated = 0
     total = len(prs.slides)
 
@@ -196,7 +219,7 @@ def main():
         if qspec:
             qids = get_question_ids(qspec)
             print(f"Slide {i + 1}: Processing {qids}...")
-            if process_slide(slide, ai_long, top_k=args.top_k, exclude_net=args.exclude_net):
+            if process_slide(slide, ai_long, key_style, top_k=args.top_k, exclude_net=args.exclude_net):
                 print(f"  [OK] Restatement added")
                 updated += 1
             else:

@@ -233,10 +233,14 @@ Examples:
         print(f"ERROR: Template file not found: {args.pptx}")
         sys.exit(1)
 
-    # Get original slide count for validation
+    # Get original slide count for validation and capture key-finding style
     from pptx import Presentation
-    from survey_pipeline.utils import is_section_divider
+    from survey_pipeline.utils import is_section_divider, ensure_key_finding_style
+
     prs = Presentation(args.pptx)
+    # Capture key-finding font/color from the original template once.
+    # This is cached globally in utils and reused by Pass 2 and Pass 3.
+    ensure_key_finding_style(prs)
     original_slide_count = len(prs.slides)
     num_sections = sum(1 for slide in prs.slides if is_section_divider(slide))
     del prs

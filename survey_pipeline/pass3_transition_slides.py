@@ -16,8 +16,8 @@ import argparse
 import copy
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
-from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import PP_PLACEHOLDER_TYPE
 from lxml import etree
 from pptx.oxml.ns import qn
 
@@ -31,6 +31,8 @@ from .utils import (
     generate_questions_asked_content,
     generate_survey_responses_content,
     call_llm,
+    ensure_key_finding_style,
+    apply_style_to_run,
 )
 from .data_loader import load_ai_long
 
@@ -57,51 +59,78 @@ def get_slide_layout(prs):
     return prs.slide_layouts[0]
 
 
-def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=None):
+def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=None, key_style=None):
     """
-    Create a new transition slide using the deck's content theme (blue/white).
-    Title is placed at top-left; body below so they never overlap.
-    Does NOT copy the section divider's background (avoids orange theme).
+    Create a new transition slide using the deck's content layout.
+    Uses the template's title and body placeholders so fonts/colors
+    match the existing content slides.
     """
     layout = get_slide_layout(prs)
     slide = prs.slides.add_slide(layout)
 
-    # Fixed positions: title at top-left, body below (matches "Research Methodology" style)
+    # Prefer using the layout's title + body placeholders so we inherit
+    # font, color, and spacing from the template.
+    title_shape = None
+    body_shape = None
+
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        if getattr(shape, "is_placeholder", False):
+            ph_type = shape.placeholder_format.type
+            if ph_type in (PP_PLACEHOLDER_TYPE.TITLE, PP_PLACEHOLDER_TYPE.CENTER_TITLE):
+                title_shape = shape
+            elif ph_type in (PP_PLACEHOLDER_TYPE.BODY, PP_PLACEHOLDER_TYPE.CONTENT) and body_shape is None:
+                body_shape = shape
+
+    # Fallbacks: first text shape as title, second as body
+    if title_shape is None:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                title_shape = shape
+                break
+    if body_shape is None:
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape is not title_shape:
+                body_shape = shape
+                break
+
+    # If the chosen layout has no usable text shapes (e.g. Blank layout),
+    # fall back to creating our own title/body boxes in standard positions.
+    left = Inches(0.5)
+    width = Inches(9)
     title_top = Inches(0.55)
     title_height = Inches(0.5)
     body_top = Inches(1.15)
     body_height = Inches(5.5)
-    left = Inches(0.5)
-    width = Inches(9)
 
-    # Clear any placeholder text from the layout so our boxes are the only content
-    for shape in slide.shapes:
-        if shape.has_text_frame and shape.text.strip():
-            try:
-                shape.text_frame.clear()
-            except Exception:
-                pass
+    if title_shape is None or not getattr(title_shape, "has_text_frame", False):
+        title_shape = slide.shapes.add_textbox(left, title_top, width, title_height)
+    if body_shape is None or not getattr(body_shape, "has_text_frame", False):
+        body_shape = slide.shapes.add_textbox(left, body_top, width, body_height)
 
-    # Title textbox at top-left (dark grey/black to match template)
-    title_shape = slide.shapes.add_textbox(left, title_top, width, title_height)
-    tf = title_shape.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.text = title_text
-    p.font.size = Pt(24)
-    p.font.bold = True
-    p.font.color.rgb = RGBColor(0x2C, 0x2C, 0x2C)
+    # Set title text
+    if title_shape is not None and getattr(title_shape, "has_text_frame", False):
+        tf = title_shape.text_frame
+        tf.text = ""
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = title_text
+        # Apply key-finding style to the title as well, but force bold
+        if p.runs and key_style:
+            apply_style_to_run(p.runs[0], key_style, force_bold=True)
 
-    # Body textbox below title
-    body_shape = slide.shapes.add_textbox(left, body_top, width, body_height)
-    tf = body_shape.text_frame
-    tf.word_wrap = True
-    _set_body_content(tf, body_text)
+    # Set body content
+    if body_shape is not None and getattr(body_shape, "has_text_frame", False):
+        tf = body_shape.text_frame
+        tf.text = ""
+        tf.word_wrap = True
+        _set_body_content(tf, body_text, key_style)
 
     return slide
 
 
-def _set_body_content(text_frame, body_text):
+def _set_body_content(text_frame, body_text, key_style=None):
     """Set body content with proper formatting. Handles bullet points."""
     lines = body_text.strip().split("\n")
 
@@ -122,14 +151,16 @@ def _set_body_content(text_frame, body_text):
             p = text_frame.add_paragraph()
 
         p.text = line
-        p.font.size = Pt(14)
-        p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
         p.space_after = Pt(6)
 
         if is_bullet:
             p.level = 0
             # Add bullet character back for visual
             p.text = f"• {line}"
+
+        # Apply key-finding style (same as main bullets) if available
+        if p.runs and key_style:
+            apply_style_to_run(p.runs[0], key_style)
 
 
 def move_slide_to_index(prs, slide, target_index):
@@ -187,6 +218,8 @@ def main():
 
     ai_long = load_ai_long(args.data)
     prs = Presentation(args.pptx)
+
+    key_style = ensure_key_finding_style(prs)
 
     original_count = len(prs.slides)
     print(f"Original slide count: {original_count}")
@@ -258,6 +291,7 @@ def main():
             f"{section_name}: Survey Responses",
             responses_content,
             ref_slide=section["slide"],
+            key_style=key_style,
         )
         move_slide_to_index(prs, slide_b, divider_idx + 1)
         slides_inserted += 1
@@ -269,6 +303,7 @@ def main():
             f"{section_name}: Questions Asked",
             questions_content,
             ref_slide=section["slide"],
+            key_style=key_style,
         )
         move_slide_to_index(prs, slide_a, divider_idx + 1)
         slides_inserted += 1

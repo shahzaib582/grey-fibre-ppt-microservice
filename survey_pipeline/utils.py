@@ -24,6 +24,9 @@ SECTION_NAMES = [
     "Demographics",
 ]
 
+# Cached style for key-finding text (from the placeholder in the template)
+KEY_FINDING_STYLE: dict | None = None
+
 
 # ═══════════════════════════════════════════════════════════
 #  Question spec parsing
@@ -180,6 +183,74 @@ def _copy_run_format(src_run, dst_run):
         pass  # If we can't copy some attr, continue gracefully
 
 
+def ensure_key_finding_style(prs: Presentation) -> dict:
+    """
+    Inspect the deck once to capture the font family, size, and color
+    from the {Insert Finding Here} placeholder. This is the style we
+    want for key-finding sentences and related bullets.
+    """
+    global KEY_FINDING_STYLE
+    if KEY_FINDING_STYLE is not None:
+        return KEY_FINDING_STYLE
+
+    style: dict = {}
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            tf = shape.text_frame
+            if not tf.text or PLACEHOLDER not in tf.text:
+                continue
+            for para in tf.paragraphs:
+                if para.runs:
+                    r0 = para.runs[0]
+                    f = r0.font
+                    style = {
+                        "name": f.name,
+                        "size": f.size,
+                        "bold": f.bold,
+                        "italic": f.italic,
+                        "rgb": getattr(getattr(f, "color", None), "rgb", None),
+                    }
+                    break
+            if style:
+                break
+        if style:
+            break
+
+    KEY_FINDING_STYLE = style
+    return KEY_FINDING_STYLE
+
+
+def apply_style_to_run(run, style: dict, force_bold: bool | None = None) -> None:
+    """Apply a captured style dict to a run. No-op if style is empty."""
+    if not style:
+        return
+    f = run.font
+    name = style.get("name")
+    size = style.get("size")
+    bold = style.get("bold")
+    italic = style.get("italic")
+    rgb = style.get("rgb")
+
+    if name:
+        f.name = name
+    if size:
+        f.size = size
+    if force_bold is not None:
+        f.bold = force_bold
+    elif bold is not None:
+        f.bold = bold
+    if italic is not None:
+        f.italic = italic
+    if rgb:
+        try:
+            f.color.rgb = rgb
+        except Exception:
+            # If color is theme-based or invalid, ignore
+            pass
+
+
 def replace_placeholder_in_shape(shape, new_text: str) -> bool:
     """
     Replace {Insert Finding Here} placeholder with new_text,
@@ -260,49 +331,41 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
     return False
 
 
-def set_shape_text_to_single_paragraph(shape, text: str) -> bool:
+def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = None) -> bool:
     """
     Set the shape's text frame to a single paragraph with the given text.
     Removes all other paragraphs (avoids long stats overlapping tables).
-    Preserves font from the first paragraph.
+    If a style dict is provided, apply it to the run (e.g. key-finding style).
     """
     if not shape.has_text_frame:
         return False
+
     from pptx.oxml.ns import qn
+
     tf = shape.text_frame
-    font_name = font_size = font_bold = font_italic = font_color = None
-    if tf.paragraphs:
-        p0 = tf.paragraphs[0]
-        if p0.runs:
-            r0 = p0.runs[0]
-            font_name, font_size = r0.font.name, r0.font.size
-            font_bold, font_italic = r0.font.bold, r0.font.italic
-            try:
-                font_color = r0.font.color.rgb
-            except Exception:
-                pass
     txBody = tf._txBody
+
+    # Keep only the first paragraph in the text frame
     paragraphs = list(txBody.findall(qn("a:p")))
     for p in paragraphs[1:]:
         txBody.remove(p)
+
     first_p = txBody.find(qn("a:p"))
     if first_p is None:
         return False
+
+    # Remove all existing runs in the first paragraph
     for r in list(first_p.findall(qn("a:r"))):
         first_p.remove(r)
+
+    # python-pptx paragraph API for adding a run
     p0 = tf.paragraphs[0]
     run = p0.add_run()
     run.text = text
-    if font_name:
-        run.font.name = font_name
-    if font_size:
-        run.font.size = font_size
-    if font_bold is not None:
-        run.font.bold = font_bold
-    if font_italic is not None:
-        run.font.italic = font_italic
-    if font_color:
-        run.font.color.rgb = font_color
+
+    if style:
+        apply_style_to_run(run, style)
+
     return True
 
 
@@ -417,8 +480,15 @@ def call_llm(system_prompt: str, user_prompt: str, model: str = "gpt-4.1-mini", 
 
 def generate_restatement(bullets: str) -> str:
     """Generate a single restatement sentence from bullet points."""
-    system = "You are a concise political survey analyst. Write exactly ONE sentence summarizing survey results. Keep it factual, executive-neutral, and under 35 words. Do not invent numbers not present in the input."
-    user = f"""Write EXACTLY ONE sentence (max 35 words) summarizing these survey results. Do not add new numbers.
+    system = (
+        "You are an executive-level political survey analyst. "
+        "Write exactly ONE expressive sentence that synthesizes the key story in the data. "
+        "Use comparative, interpretive phrasing (e.g., 'is rated X while Y...'), but stay factual, "
+        "executive-neutral, and under 45 words. Do not invent any numbers."
+    )
+    user = f"""Write EXACTLY ONE sentence (max 45 words) summarizing these survey results.
+Make it feel like a key finding in a client deck: describe who is higher/lower, what stands out most, and any clear patterns.
+Do not add new numbers; only use the numbers already shown.
 
 {bullets}"""
     return call_llm(system, user)
