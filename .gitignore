@@ -1,0 +1,37 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Excel lock files
+~$*.xlsx
+~$*.xls
+
+# Pipeline outputs and data (remove these lines to commit sample .pptx / .xlsx)
+*.pptx
+*.xlsx
+qmap.txt
+*.log
+pipeline_temp_*/
+output_pass*.pptx
