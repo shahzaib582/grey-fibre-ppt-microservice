@@ -96,9 +96,12 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
                 break
 
     # If the chosen layout has no usable text shapes (e.g. Blank layout),
-    # fall back to creating our own title/body boxes in standard positions.
+    # fall back to creating our own title/body boxes. Size them based on
+    # the actual slide width so margins match other slides.
+    slide_width = prs.slide_width
     left = Inches(0.5)
-    width = Inches(9)
+    right_margin = Inches(0.5)
+    width = slide_width - left - right_margin
     title_top = Inches(0.55)
     title_height = Inches(0.5)
     body_top = Inches(1.15)
@@ -119,6 +122,8 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
         # Apply key-finding style to the title as well, but force bold
         if p.runs and key_style:
             apply_style_to_run(p.runs[0], key_style, force_bold=True)
+            # Override size to 28pt as requested
+            p.runs[0].font.size = Pt(28)
 
     # Set body content
     if body_shape is not None and getattr(body_shape, "has_text_frame", False):

@@ -60,12 +60,20 @@ def find_values_shape(slide):
     return None, None
 
 
+def slide_has_table(slide):
+    """True if the slide contains a table shape (e.g. multi-question favorability table)."""
+    for shape in slide.shapes:
+        if getattr(shape, "has_table", False):
+            return True
+    return False
+
+
 def find_question_shape(slide):
     """
     Find the shape that contains the question text (e.g. 'Question 6:' line).
     Used as the style source for key-finding text.
     """
-    pattern = re.compile(r"\\bQuestion[s]?\\s+\\d+\\s*:", re.IGNORECASE)
+    pattern = re.compile(r"\bQuestion[s]?\s+\d+\s*:", re.IGNORECASE)
     for shape in slide.shapes:
         if not shape.has_text_frame:
             continue
@@ -218,6 +226,9 @@ def main():
         qspec = parse_question_spec(slide_text)
         if qspec:
             qids = get_question_ids(qspec)
+            if slide_has_table(slide):
+                print(f"Slide {i + 1}: Skipping {qids} (slide has table — no summary sentence)")
+                continue
             print(f"Slide {i + 1}: Processing {qids}...")
             if process_slide(slide, ai_long, key_style, top_k=args.top_k, exclude_net=args.exclude_net):
                 print(f"  [OK] Restatement added")

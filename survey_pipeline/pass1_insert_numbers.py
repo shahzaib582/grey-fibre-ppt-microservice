@@ -157,28 +157,20 @@ def process_slide(slide, ai_long, top_k=3, exclude_net=True, pct_decimals=0):
     chart_updated = False
     fallback = "No data available for this question."
 
-    if qspec[0] == "single":
-        # Single question — top K from that question
-        rows = select_top_rows(ai_long, qids[0], top_k=top_k, exclude_net=exclude_net)
-        if rows.empty:
-            print(f"  [WARN] No data found for {qids[0]} — using fallback text")
-            values_text = fallback
-        else:
-            values_text = format_values(rows, pct_decimals=pct_decimals)
-            if _update_chart_for_single_question(slide, rows):
-                chart_updated = True
+    if qspec[0] != "single":
+        # For now we leave multi-question (range) slides completely untouched.
+        print(f"  [SKIP] Multi-question slide {qids} — no numeric insert or chart update")
+        return False
+
+    # Single question — top K from that question
+    rows = select_top_rows(ai_long, qids[0], top_k=top_k, exclude_net=exclude_net)
+    if rows.empty:
+        print(f"  [WARN] No data found for {qids[0]} — using fallback text")
+        values_text = fallback
     else:
-        # Range of questions — grouped format + optional multi-series chart update
-        values_text = format_values_grouped(
-            ai_long, qids, top_k=top_k,
-            exclude_net=exclude_net, pct_decimals=pct_decimals
-        )
-        if not values_text:
-            print(f"  [WARN] No data found for questions {qids[0]}-{qids[-1]} — using fallback text")
-            values_text = fallback
-        else:
-            if _update_chart_for_multi_questions(slide, ai_long, qids, exclude_net=exclude_net):
-                chart_updated = True
+        values_text = format_values(rows, pct_decimals=pct_decimals)
+        if _update_chart_for_single_question(slide, rows):
+            chart_updated = True
 
     # Replace placeholder in all shapes
     replaced = False

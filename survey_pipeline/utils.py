@@ -481,13 +481,16 @@ def call_llm(system_prompt: str, user_prompt: str, model: str = "gpt-4.1-mini", 
 def generate_restatement(bullets: str) -> str:
     """Generate a single restatement sentence from bullet points."""
     system = (
-        "You are an executive-level political survey analyst. "
+        "You are an executive-level political survey analyst writing for senior decision-makers. "
         "Write exactly ONE expressive sentence that synthesizes the key story in the data. "
-        "Use comparative, interpretive phrasing (e.g., 'is rated X while Y...'), but stay factual, "
-        "executive-neutral, and under 45 words. Do not invent any numbers."
+        "Use an analytical, research-oriented tone: explain what the finding implies or why it matters, "
+        "not just restate the numbers. Use comparative, interpretive phrasing (e.g., 'is rated X while Y...'), "
+        "stay factual and executive-neutral, and must keep under 35 words. Do not invent any numbers."
     )
-    user = f"""Write EXACTLY ONE sentence (max 45 words) summarizing these survey results.
-Make it feel like a key finding in a client deck: describe who is higher/lower, what stands out most, and any clear patterns.
+    user = f"""Write EXACTLY ONE sentence (max 35 words) summarizing these survey results.
+
+Match the analytical flow of a research finding: purpose/importance and what it implies, not just survey metadata.
+Describe who is higher/lower, what stands out most, and any clear patterns—in a way that supports interpretation and decisions.
 Do not add new numbers; only use the numbers already shown.
 
 {bullets}"""
@@ -498,18 +501,31 @@ def generate_questions_asked_content(section_name: str, question_texts: dict) ->
     """Generate 'Questions Asked' transition slide content."""
     q_list = "\n".join([f"- {qid}: {text}" for qid, text in question_texts.items()])
 
-    system = "You are a concise political survey analyst preparing executive briefing slides. Write in executive-neutral tone. No numeric values. Keep under 1000 characters."
-    user = f"""For the "{section_name}" section of a political benchmark survey, summarize WHAT RESPONDENTS WERE ASKED.
+    system = (
+        "You are a political survey analyst writing for senior decision-makers. "
+        "Explain, in analytic language, what this section of the survey is measuring and why it matters. "
+        "Do NOT restate the exact question wording; summarize concepts."
+    )
+    user = f"""You are preparing the **"{{section_name}}: Questions Asked"** transition slide for a survey deck.
 
-Questions in this section:
+Section name: "{section_name}"
+
+Questions in this section (IDs and abbreviated text):
 {q_list}
 
-Write a bullet-point summary covering:
-• Question themes
-• Behavioral measurement intent
-• Analytical framing
+Write 5–6 bullet points that follow THIS conceptual sequence:
+1. **Section purpose** – what this section is designed to measure and why (high-level intent).
+2. **Measurement approach** – how the questions collectively capture that concept (dimensions/topics being probed).
+3. **Measurement refinement** – how scales, frequency, intensity, or framing sharpen interpretation (e.g., strength of feeling, tradeoffs, behavior vs attitude).
+4. **Analytical importance** – why these questions matter for understanding voters/respondents in this context.
+5. **Segmentation value** – how responses enable segmentation (e.g., by attitudes, behavior, intensity, demographics).
+6. **Context for later findings** – how these questions set up or contextualize findings that appear later in the deck.
 
-Format as clean bullet points. No numeric values. Executive neutral tone. Maximum 1000 characters."""
+Guidelines:
+- Focus on analytic **content structure**, not formatting. Write each bullet as a short narrative sentence that explains the concept—not a fragment or survey-question label.
+- NO numeric values and NO mention of question numbers (Q1, Q2, etc.).
+- Write as clean bullet points (start each line with "• ").
+- Keep total length under 900 characters."""
 
     return call_llm(system, user)
 
@@ -529,16 +545,30 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
 
     data_summary = "\n".join(data_parts)
 
-    system = "You are a concise political survey analyst preparing executive briefing slides. Include key percentages. Preserve numeric accuracy. Highlight leaders, margins, and plurality. Keep under 1000 characters."
-    user = f"""For the "{section_name}" section, write a concise synthesis of the MAJOR FINDINGS.
+    system = (
+        "You are a political survey analyst preparing executive briefing slides. "
+        "Summarize survey RESULTS in a structured, analytic way for senior readers. "
+        "Stay strictly faithful to the numbers provided."
+    )
+    user = f"""You are preparing the **"{{section_name}}: Survey Responses"** transition slide.
 
-Data:
+Section name: "{section_name}"
+
+Data for this section (per question, with top answer options and percentages):
 {data_summary}
 
-Write a concise bullet-point synthesis:
-• Include key percentages
-• Preserve numeric accuracy from the data
-• Highlight leaders, margins, plurality
-• Maximum 1000 characters"""
+Write 5–6 bullet points that follow THIS conceptual sequence:
+1. **Topline pattern** – what the results broadly show in this section (e.g., overall support, divide, concern).
+2. **Key comparisons** – how major options or items compare (leaders vs laggards, strongest vs weakest responses).
+3. **Intensity and distribution** – where responses are concentrated (e.g., strong vs soft support, extremes vs middle).
+4. **Segment or subgroup differences (if implied by options)** – call out any clear splits between types of responses (e.g., positive vs negative, incumbents vs challengers, economic vs social issues).
+5. **Implications for interpretation** – what these patterns mean for how to read this section (e.g., mandate strength, vulnerability, momentum).
+6. **Forward-looking context** – how these results will inform later sections, messaging, or strategy.
+
+Guidelines:
+- Use key percentages from the data where helpful (e.g., “around 6 in 10”, or explicit % when clear).
+- Do NOT invent any new numbers or options beyond what appears in the data summary above.
+- Write as clean bullet points (start each line with "• ").
+- Keep total length under 900 characters."""
 
     return call_llm(system, user)
