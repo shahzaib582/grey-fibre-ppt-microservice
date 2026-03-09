@@ -23,6 +23,7 @@ from pptx.oxml.ns import qn
 
 from .utils import (
     SECTION_NAMES,
+    PLACEHOLDER,
     is_section_divider,
     get_section_questions,
     get_slide_text,
@@ -59,39 +60,176 @@ def get_slide_layout(prs):
     return prs.slide_layouts[0]
 
 
-def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=None, key_style=None):
+def _remap_embed_rids_in_element(element, src_part, dst_part):
     """
-    Create a new transition slide using the deck's content layout.
-    Uses the template's title and body placeholders so fonts/colors
-    match the existing content slides.
+    Find all r:embed refs in element and add corresponding relationships
+    to dst_part, updating the embed attrs to the new rIds.
     """
-    layout = get_slide_layout(prs)
+    r_embed = qn("r:embed")
+    for el in element.iter():
+        rid = el.get(r_embed)
+        if rid and src_part.rels.get(rid):
+            rel = src_part.rels[rid]
+            new_rid = dst_part.rels.get_or_add(rel.reltype, rel.target_part)
+            el.set(r_embed, new_rid)
+
+
+def _copy_background_from_element(src_element, src_part, dst_slide):
+    """Copy p:bg from src_element (cSld) to dst_slide. Remap image rIds to dst part."""
+    src_bg = src_element.find(qn("p:bg"))
+    if src_bg is None:
+        return False
+    dst_cSld = dst_slide._element.find(qn("p:cSld"))
+    if dst_cSld is None:
+        return False
+    dst_bg = dst_cSld.find(qn("p:bg"))
+    if dst_bg is not None:
+        dst_cSld.remove(dst_bg)
+    new_bg = copy.deepcopy(src_bg)
+    _remap_embed_rids_in_element(new_bg, src_part, dst_slide.part)
+    dst_cSld.insert(0, new_bg)
+    dst_slide.follow_master_background = False
+    return True
+
+
+def _copy_slide_background(ref_slide, dst_slide):
+    """
+    Copy the background (light grey + blue footer image) to dst_slide.
+    Tries: 1) ref_slide's explicit bg, 2) ref_slide's layout's bg.
+    """
+    # Try from the content slide directly
+    if not getattr(ref_slide, "follow_master_background", True):
+        cSld = ref_slide._element.find(qn("p:cSld"))
+        if cSld is not None and _copy_background_from_element(cSld, ref_slide.part, dst_slide):
+            return
+    # Fallback: copy from the layout (used by content slides)
+    layout = ref_slide.slide_layout
+    layout_cSld = layout._element.find(qn("p:cSld"))
+    if layout_cSld is not None:
+        _copy_background_from_element(layout_cSld, layout.part, dst_slide)
+
+
+def _next_shape_id(slide):
+    """Return next available shape id for the slide."""
+    max_id = 0
+    for shp in slide.shapes:
+        sid = getattr(shp, "shape_id", None)
+        if sid is not None:
+            try:
+                max_id = max(max_id, int(sid))
+            except (TypeError, ValueError):
+                pass
+    return max_id + 1
+
+
+def _copy_slide_number_placeholder(ref_slide, dst_slide):
+    """Copy the slide number placeholder from ref_slide (or its layout) if dst_slide doesn't have one."""
+    has_sldnum = any(
+        getattr(shp, "is_placeholder", False)
+        and getattr(shp, "placeholder_format", None)
+        and getattr(shp.placeholder_format, "type", None) == PP_PLACEHOLDER_TYPE.SLIDE_NUMBER
+        for shp in dst_slide.shapes
+    )
+    if has_sldnum:
+        return
+    # Try ref_slide first, then its layout, then slide master
+    sources = []
+    if ref_slide is not None:
+        sources.append(ref_slide)
+        try:
+            layout = getattr(ref_slide, "slide_layout", None)
+            if layout is not None:
+                sources.append(layout)
+                master = getattr(layout, "slide_master", None)
+                if master is not None:
+                    sources.append(master)
+        except Exception:
+            pass
+    for src in sources:
+        if src is None:
+            continue
+        for shp in src.shapes:
+            if not getattr(shp, "is_placeholder", False):
+                continue
+            if getattr(shp, "placeholder_format", None) is None:
+                continue
+            if getattr(shp.placeholder_format, "type", None) != PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+                continue
+            el = shp.element
+            new_el = copy.deepcopy(el)
+            # Assign unique shape id to avoid PowerPoint repair errors
+            nv_sp_pr = new_el.find(qn("p:nvSpPr"))
+            if nv_sp_pr is not None:
+                c_nv_pr = nv_sp_pr.find(qn("p:cNvPr"))
+                if c_nv_pr is not None:
+                    c_nv_pr.set("id", str(_next_shape_id(dst_slide)))
+            # Remap r:embed refs if copying from layout (different part)
+            if src is not ref_slide:
+                _remap_embed_rids_in_element(new_el, src.part, dst_slide.part)
+            sp_tree = dst_slide.shapes._spTree
+            ext_lst = sp_tree.find(qn("p:extLst"))
+            if ext_lst is not None:
+                sp_tree.insert_element_before(new_el, qn("p:extLst"))
+            else:
+                sp_tree.append(new_el)
+            return
+
+
+def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=None, key_style=None, layout=None):
+    """
+    Create a new transition slide using a content-style layout.
+    Uses the template's title and body placeholders so fonts/colors,
+    background, and footer elements match the chosen layout.
+    """
+    if layout is None:
+        layout = get_slide_layout(prs)
     slide = prs.slides.add_slide(layout)
 
+    # Copy the Key Findings slide's explicit background (light grey + blue footer).
+    if ref_slide is not None:
+        try:
+            _copy_slide_background(ref_slide, slide)
+        except Exception:
+            pass
+
+    # Ensure slide number placeholder is present (layout may not include it).
+    if ref_slide is not None:
+        try:
+            _copy_slide_number_placeholder(ref_slide, slide)
+        except Exception:
+            pass
+
     # Prefer using the layout's title + body placeholders so we inherit
-    # font, color, and spacing from the template.
+    # font, color, and spacing from the template. Never use slide number as title/body.
     title_shape = None
     body_shape = None
 
+    def _is_slide_num(shp):
+        return (
+            getattr(shp, "is_placeholder", False)
+            and getattr(shp, "placeholder_format", None)
+            and getattr(shp.placeholder_format, "type", None) == PP_PLACEHOLDER_TYPE.SLIDE_NUMBER
+        )
+
     for shape in slide.shapes:
-        if not shape.has_text_frame:
+        if not shape.has_text_frame or _is_slide_num(shape):
             continue
         if getattr(shape, "is_placeholder", False):
             ph_type = shape.placeholder_format.type
             if ph_type in (PP_PLACEHOLDER_TYPE.TITLE, PP_PLACEHOLDER_TYPE.CENTER_TITLE):
                 title_shape = shape
-            elif ph_type in (PP_PLACEHOLDER_TYPE.BODY, PP_PLACEHOLDER_TYPE.CONTENT) and body_shape is None:
+            elif ph_type == PP_PLACEHOLDER_TYPE.BODY and body_shape is None:
                 body_shape = shape
 
-    # Fallbacks: first text shape as title, second as body
+    # Fallbacks: first text shape as title, second as body (skip slide number)
     if title_shape is None:
         for shape in slide.shapes:
-            if shape.has_text_frame:
+            if shape.has_text_frame and not _is_slide_num(shape):
                 title_shape = shape
                 break
     if body_shape is None:
         for shape in slide.shapes:
-            if shape.has_text_frame and shape is not title_shape:
+            if shape.has_text_frame and not _is_slide_num(shape) and shape is not title_shape:
                 body_shape = shape
                 break
 
@@ -131,6 +269,16 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
         tf.text = ""
         tf.word_wrap = True
         _set_body_content(tf, body_text, key_style)
+
+    # Clear any other shapes with placeholder text so validation finds the real title
+    # (content placeholder may have "Click to add text" or {Insert Finding Here})
+    for shape in slide.shapes:
+        if shape is title_shape or shape is body_shape:
+            continue
+        if shape.has_text_frame:
+            t = shape.text_frame.text.strip()
+            if PLACEHOLDER in t or "click to add" in t.lower():
+                shape.text_frame.text = ""
 
     return slide
 
@@ -255,6 +403,30 @@ def main():
         prs.save(args.out)
         return
 
+    # Use the actual Key Findings CONTENT slide (light grey + blue footer).
+    # Exclude the dark-blue "Key Findings" divider. Content slides have a
+    # chart and/or substantial body text; the divider has little content.
+    keyfinding_layout = None
+    keyfinding_slide = None
+    candidates = []
+    for s in prs.slides:
+        text = get_slide_text(s)
+        if "key findings" not in text.lower():
+            continue
+        if is_section_divider(s):
+            continue
+        has_chart = any(getattr(shp, "has_chart", False) for shp in s.shapes)
+        candidates.append((s, len(text), has_chart))
+    # Prefer: has chart, then longest text (content has bullet + chart labels)
+    candidates.sort(key=lambda x: (x[2], x[1]), reverse=True)
+    if candidates:
+        keyfinding_slide, _, _ = candidates[0]
+        keyfinding_layout = keyfinding_slide.slide_layout or get_slide_layout(prs)
+        print(f"Using Key Findings content slide for transitions: '{keyfinding_layout.name}'")
+    if keyfinding_layout is None:
+        keyfinding_layout = get_slide_layout(prs)
+        print(f"[INFO] No Key Findings content slide found; falling back to '{keyfinding_layout.name}'")
+
     # Step 2: Generate transition slides (work backwards to preserve indices)
     slides_inserted = 0
 
@@ -289,26 +461,28 @@ def main():
             print(f"  [ERROR] Failed to generate questions content: {e}")
             questions_content = "• Questions were asked in this section."
 
-        # Create Slide B (Survey Responses) — inserted first so it ends up AFTER Slide A
+        # Create Slide B — inserted first so it ends up AFTER Slide A (title = section name only)
         slide_b = create_transition_slide(
             prs,
             divider_idx + 1,
-            f"{section_name}: Survey Responses",
+            section_name,
             responses_content,
-            ref_slide=section["slide"],
+            ref_slide=keyfinding_slide,
             key_style=key_style,
+            layout=keyfinding_layout,
         )
         move_slide_to_index(prs, slide_b, divider_idx + 1)
         slides_inserted += 1
 
-        # Create Slide A (Questions Asked)
+        # Create Slide A (title = section name only)
         slide_a = create_transition_slide(
             prs,
             divider_idx + 1,
-            f"{section_name}: Questions Asked",
+            section_name,
             questions_content,
-            ref_slide=section["slide"],
+            ref_slide=keyfinding_slide,
             key_style=key_style,
+            layout=keyfinding_layout,
         )
         move_slide_to_index(prs, slide_a, divider_idx + 1)
         slides_inserted += 1

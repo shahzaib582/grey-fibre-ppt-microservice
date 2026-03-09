@@ -23,6 +23,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Bump this string whenever you deploy a new version so you can
+# verify which build your n8n workflow is hitting.
+API_VERSION = "2026-03-10-v1"
+
 
 def _sanitize_filename(name: str) -> str:
     """Allow only safe characters for output filename."""
@@ -46,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Survey Slide Pipeline API",
     description="Runs 3-pass survey slide automation (numbers, restatements, transition slides) and returns the final PPTX.",
-    version="1.0.0",
+    version=API_VERSION,
     lifespan=lifespan,
 )
 
@@ -55,6 +59,7 @@ app = FastAPI(
 async def root():
     return {
         "service": "Survey Slide Pipeline API",
+        "version": API_VERSION,
         "docs": "/docs",
         "health": "/health",
         "generate": "POST /generate (multipart: data, template, output_name)",
@@ -64,6 +69,12 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/version")
+async def version():
+    """Simple version endpoint to confirm deployed build."""
+    return {"version": API_VERSION}
 
 
 @app.post("/generate")

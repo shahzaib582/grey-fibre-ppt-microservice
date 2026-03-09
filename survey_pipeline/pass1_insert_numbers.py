@@ -169,8 +169,9 @@ def process_slide(slide, ai_long, top_k=3, exclude_net=True, pct_decimals=0):
         values_text = fallback
     else:
         values_text = format_values(rows, pct_decimals=pct_decimals)
-        if _update_chart_for_single_question(slide, rows):
-            chart_updated = True
+        # Client: do not touch or alter charts/graphs; preserve original answer choice capitalization
+        # if _update_chart_for_single_question(slide, rows):
+        #     chart_updated = True
 
     # Replace placeholder in all shapes
     replaced = False

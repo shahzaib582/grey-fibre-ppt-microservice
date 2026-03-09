@@ -76,13 +76,32 @@ def validate_output(pptx_path, original_slide_count, num_sections):
     prs = Presentation(pptx_path)
     issues = []
 
-    # Helper: get a simple title string for a slide (first non-empty text)
+    # Helper: get a simple title string for a slide (prefer title placeholder, skip slide number)
     def _get_title(slide):
+        from pptx.enum.shapes import PP_PLACEHOLDER_TYPE
+        title_types = (PP_PLACEHOLDER_TYPE.TITLE, PP_PLACEHOLDER_TYPE.CENTER_TITLE)
+        # First pass: look for explicit title placeholder
         for shape in slide.shapes:
-            if shape.has_text_frame:
-                text = shape.text_frame.text.strip()
-                if text:
-                    return text
+            if not shape.has_text_frame:
+                continue
+            if getattr(shape, "is_placeholder", False) and getattr(shape, "placeholder_format", None):
+                ph_type = getattr(shape.placeholder_format, "type", None)
+                if ph_type == PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+                    continue
+                if ph_type in title_types:
+                    text = shape.text_frame.text.strip()
+                    if text:
+                        return text
+        # Fallback: first non-empty text (skip slide number)
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            if getattr(shape, "is_placeholder", False) and getattr(shape, "placeholder_format", None):
+                if getattr(shape.placeholder_format, "type", None) == PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+                    continue
+            text = shape.text_frame.text.strip()
+            if text:
+                return text
         return ""
 
     # Helper: get all text for character-count checks
@@ -101,6 +120,7 @@ def validate_output(pptx_path, original_slide_count, num_sections):
         for shape in slide.shapes:
             if shape.has_text_frame and PLACEHOLDER in shape.text_frame.text:
                 placeholder_slides.append(i + 1)
+                break
     if placeholder_slides:
         issues.append(f"Remaining placeholders on slides: {placeholder_slides}")
     else:
@@ -133,33 +153,27 @@ def validate_output(pptx_path, original_slide_count, num_sections):
             for j, (start_idx, section_name) in enumerate(section_indices):
                 end_idx = section_indices[j + 1][0] if j + 1 < len(section_indices) else len(prs.slides)
 
-                qa_title = f"{section_name}: Questions Asked"
-                sr_title = f"{section_name}: Survey Responses"
-                qa_slides = []
-                sr_slides = []
-
-                for k in range(start_idx + 1, end_idx):
+                # Transition slides use section name only (no "Questions Asked" / "Survey Responses")
+                transition_slides = []
+                for k in range(start_idx + 1, min(start_idx + 3, end_idx)):
                     title = _get_title(prs.slides[k])
-                    if title == qa_title:
-                        qa_slides.append(k + 1)  # human 1-based
-                    elif title == sr_title:
-                        sr_slides.append(k + 1)
+                    if title == section_name:
+                        transition_slides.append(k + 1)
 
-                if len(qa_slides) != 1 or len(sr_slides) != 1:
+                if len(transition_slides) != 2:
                     issues.append(
-                        f"Section '{section_name}' expects 1 'Questions Asked' and 1 'Survey Responses' slide; "
-                        f"found QA={len(qa_slides)}, SR={len(sr_slides)} "
-                        f"(QA slides: {qa_slides or 'none'}, SR slides: {sr_slides or 'none'})"
+                        f"Section '{section_name}' expects 2 transition slides; "
+                        f"found {len(transition_slides)} "
+                        f"(slides: {transition_slides or 'none'})"
                     )
                 else:
                     print(
                         f"  [OK] Section '{section_name}': "
-                        f"transition slides on slides {qa_slides[0]} (Questions Asked) "
-                        f"and {sr_slides[0]} (Survey Responses)"
+                        f"transition slides on slides {transition_slides[0]} and {transition_slides[1]}"
                     )
 
                 # Character-count check (<= 1000 chars) on transition slides only
-                for slide_num in qa_slides + sr_slides:
+                for slide_num in transition_slides:
                     text_len = len(_get_all_text(prs.slides[slide_num - 1]))
                     if text_len > 1000:
                         issues.append(

@@ -485,7 +485,8 @@ def generate_restatement(bullets: str) -> str:
         "Write exactly ONE expressive sentence that synthesizes the key story in the data. "
         "Use an analytical, research-oriented tone: explain what the finding implies or why it matters, "
         "not just restate the numbers. Use comparative, interpretive phrasing (e.g., 'is rated X while Y...'), "
-        "stay factual and executive-neutral, and must keep under 35 words. Do not invent any numbers."
+        "stay factual and executive-neutral, and must keep under 35 words. Do not invent any numbers. "
+        "When citing results, echo the question context (what was asked) rather than referring to question numbers like Q7, Q8."
     )
     user = f"""Write EXACTLY ONE sentence (max 35 words) summarizing these survey results.
 
@@ -506,7 +507,7 @@ def generate_questions_asked_content(section_name: str, question_texts: dict) ->
         "Explain, in analytic language, what this section of the survey is measuring and why it matters. "
         "Do NOT restate the exact question wording; summarize concepts."
     )
-    user = f"""You are preparing the **"{{section_name}}: Questions Asked"** transition slide for a survey deck.
+    user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
 
 Section name: "{section_name}"
 
@@ -550,7 +551,7 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
         "Summarize survey RESULTS in a structured, analytic way for senior readers. "
         "Stay strictly faithful to the numbers provided."
     )
-    user = f"""You are preparing the **"{{section_name}}: Survey Responses"** transition slide.
+    user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
 
 Section name: "{section_name}"
 
@@ -566,6 +567,7 @@ Write 5–6 bullet points that follow THIS conceptual sequence:
 6. **Forward-looking context** – how these results will inform later sections, messaging, or strategy.
 
 Guidelines:
+- CRITICAL: When describing what we did or what we found, ECHO BACK THE ACTUAL QUESTION asked. Do NOT say "In Q7 65% said X, in Q8 55% said Y." Instead weave in the question context: e.g., "When asked about [actual question topic], 65% said X. Among those asked [next question topic], 55% said Y." The context of what we asked matters and must be woven into the text.
 - Use key percentages from the data where helpful (e.g., “around 6 in 10”, or explicit % when clear).
 - Do NOT invent any new numbers or options beyond what appears in the data summary above.
 - Write as clean bullet points (start each line with "• ").
