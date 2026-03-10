@@ -182,6 +182,9 @@ def process_slide(slide, ai_long, key_style, top_k=3, exclude_net=True):
         print(f"  [ERROR] LLM call failed for {qids}: {e}")
         return False
 
+    # Remove leading bullet character if LLM included it
+    restatement = restatement.lstrip("•-* \t")
+
     if mode == "placeholder":
         # If placeholder still exists, replace it with restatement only (sentence, no raw stats).
         # replace_placeholder_in_shape already preserves the placeholder's font and color.

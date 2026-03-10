@@ -237,18 +237,26 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
     # fall back to creating our own title/body boxes. Size them based on
     # the actual slide width so margins match other slides.
     slide_width = prs.slide_width
+    slide_height = prs.slide_height
+    footer_clearance = Inches(0.85)  # leave space for blue footer so text doesn't touch
     left = Inches(0.5)
     right_margin = Inches(0.5)
     width = slide_width - left - right_margin
     title_top = Inches(0.55)
     title_height = Inches(0.5)
     body_top = Inches(1.15)
-    body_height = Inches(5.5)
+    body_height_max = slide_height - int(body_top) - int(footer_clearance)
+    body_height = min(int(Inches(5.5)), body_height_max)
 
     if title_shape is None or not getattr(title_shape, "has_text_frame", False):
         title_shape = slide.shapes.add_textbox(left, title_top, width, title_height)
     if body_shape is None or not getattr(body_shape, "has_text_frame", False):
         body_shape = slide.shapes.add_textbox(left, body_top, width, body_height)
+    else:
+        # Constrain layout body shape so text doesn't touch footer
+        body_max_for_layout = slide_height - int(body_shape.top) - int(footer_clearance)
+        if body_shape.height > body_max_for_layout:
+            body_shape.height = body_max_for_layout
 
     # Set title text
     if title_shape is not None and getattr(title_shape, "has_text_frame", False):
@@ -283,6 +291,34 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
     return slide
 
 
+# Max chars per transition slide body (excess goes to continuation slides)
+MAX_CHARS_PER_SLIDE = 1150
+
+
+def _split_body_content(body_text: str, max_chars: int = MAX_CHARS_PER_SLIDE) -> list[str]:
+    """Split body text into chunks that fit on one slide. Splits at bullet boundaries."""
+    lines = body_text.strip().split("\n")
+    chunks = []
+    current = []
+    current_len = 0
+
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        line_len = len(line_stripped) + 1  # +1 for newline
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line_stripped)
+        current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks if chunks else [""]
+
+
 def _set_body_content(text_frame, body_text, key_style=None):
     """Set body content with proper formatting. Handles bullet points."""
     lines = body_text.strip().split("\n")
@@ -314,6 +350,29 @@ def _set_body_content(text_frame, body_text, key_style=None):
         # Apply key-finding style (same as main bullets) if available
         if p.runs and key_style:
             apply_style_to_run(p.runs[0], key_style)
+
+
+def _replace_key_findings_with_section(prs):
+    """Replace 'Key Findings' with section name on all slides in each section.
+    Replaces text in-place within runs to preserve font color, family, and size."""
+    section_ranges = []
+    for idx, slide in enumerate(prs.slides):
+        sec_name = is_section_divider(slide)
+        if sec_name:
+            section_ranges.append((idx, sec_name))
+    for j, (start_idx, section_name) in enumerate(section_ranges):
+        end_idx = section_ranges[j + 1][0] if j + 1 < len(section_ranges) else len(prs.slides)
+        for k in range(start_idx, end_idx):
+            slide = prs.slides[k]
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                tf = shape.text_frame
+                for para in tf.paragraphs:
+                    for run in para.runs:
+                        if "key findings" in run.text.lower():
+                            run.text = run.text.replace("Key Findings", section_name)
+                            run.text = run.text.replace("key findings", section_name)
 
 
 def move_slide_to_index(prs, slide, target_index):
@@ -462,34 +521,43 @@ def main():
             questions_content = "• Questions were asked in this section."
 
         # Create Slide B — inserted first so it ends up AFTER Slide A (title = section name only)
-        slide_b = create_transition_slide(
-            prs,
-            divider_idx + 1,
-            section_name,
-            responses_content,
-            ref_slide=keyfinding_slide,
-            key_style=key_style,
-            layout=keyfinding_layout,
-        )
-        move_slide_to_index(prs, slide_b, divider_idx + 1)
-        slides_inserted += 1
+        # Split content; excess goes to continuation slides. Insert in reverse so order is correct.
+        response_chunks = _split_body_content(responses_content)
+        for chunk in reversed(response_chunks):
+            slide_b = create_transition_slide(
+                prs,
+                divider_idx + 1,
+                section_name,
+                chunk,
+                ref_slide=keyfinding_slide,
+                key_style=key_style,
+                layout=keyfinding_layout,
+            )
+            move_slide_to_index(prs, slide_b, divider_idx + 1)
+            slides_inserted += 1
 
         # Create Slide A (title = section name only)
-        slide_a = create_transition_slide(
-            prs,
-            divider_idx + 1,
-            section_name,
-            questions_content,
-            ref_slide=keyfinding_slide,
-            key_style=key_style,
-            layout=keyfinding_layout,
-        )
-        move_slide_to_index(prs, slide_a, divider_idx + 1)
-        slides_inserted += 1
+        question_chunks = _split_body_content(questions_content)
+        for chunk in reversed(question_chunks):
+            slide_a = create_transition_slide(
+                prs,
+                divider_idx + 1,
+                section_name,
+                chunk,
+                ref_slide=keyfinding_slide,
+                key_style=key_style,
+                layout=keyfinding_layout,
+            )
+            move_slide_to_index(prs, slide_a, divider_idx + 1)
+            slides_inserted += 1
 
-        print(f"  [OK] 2 transition slides inserted after '{section_name}'")
+        total = len(response_chunks) + len(question_chunks)
+        print(f"  [OK] {total} transition slide(s) inserted after '{section_name}'")
 
-    # Step 3: Save
+    # Step 3: Replace "Key Findings" with section name on all slides in each section
+    _replace_key_findings_with_section(prs)
+
+    # Step 4: Save
     prs.save(args.out)
 
     final_count = len(prs.slides)

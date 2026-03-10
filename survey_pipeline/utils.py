@@ -251,6 +251,21 @@ def apply_style_to_run(run, style: dict, force_bold: bool | None = None) -> None
             pass
 
 
+def _remove_paragraph_bullet(para) -> None:
+    """Remove bullet from paragraph by adding a:buNone to paragraph properties."""
+    from lxml import etree
+    from pptx.oxml.ns import qn
+    p = para._p
+    pPr = p.find(qn("a:pPr"))
+    if pPr is None:
+        pPr = etree.SubElement(p, qn("a:pPr"))
+    for bullet in ("a:buChar", "a:buAutoNum", "a:buBlip", "a:buNone"):
+        existing = pPr.find(qn(bullet))
+        if existing is not None:
+            pPr.remove(existing)
+    pPr.append(etree.Element(qn("a:buNone")))
+
+
 def replace_placeholder_in_shape(shape, new_text: str) -> bool:
     """
     Replace {Insert Finding Here} placeholder with new_text,
@@ -313,6 +328,7 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             run.font.color.rgb = font_color
 
         # Add additional paragraphs for remaining lines
+        from lxml import etree
         from pptx.oxml.ns import qn
         for line in lines[1:]:
             new_p = copy.deepcopy(para._p)
@@ -323,9 +339,19 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             new_r = copy.deepcopy(run._r)
             new_r.text = line
             new_p.append(new_r)
+            # Remove bullet from copied paragraph
+            new_pPr = new_p.find(qn("a:pPr"))
+            if new_pPr is None:
+                new_pPr = etree.SubElement(new_p, qn("a:pPr"))
+            for bullet in ("a:buChar", "a:buAutoNum", "a:buBlip", "a:buNone"):
+                existing = new_pPr.find(qn(bullet))
+                if existing is not None:
+                    new_pPr.remove(existing)
+            new_pPr.append(etree.Element(qn("a:buNone")))
             # Insert after current paragraph
             para._p.addnext(new_p)
 
+        _remove_paragraph_bullet(para)
         return True
 
     return False
@@ -366,6 +392,7 @@ def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = No
     if style:
         apply_style_to_run(run, style)
 
+    _remove_paragraph_bullet(p0)
     return True
 
 
@@ -524,7 +551,7 @@ Write 5–6 bullet points that follow THIS conceptual sequence:
 
 Guidelines:
 - Focus on analytic **content structure**, not formatting. Write each bullet as a short narrative sentence that explains the concept—not a fragment or survey-question label.
-- NO numeric values and NO mention of question numbers (Q1, Q2, etc.).
+- NO numeric values. NEVER use question numbers (Q7, Q10, etc.); use the question topic/concept instead so readers do not need to look at question slides.
 - Write as clean bullet points (start each line with "• ").
 - Keep total length under 900 characters."""
 
@@ -534,7 +561,7 @@ Guidelines:
 def generate_survey_responses_content(section_name: str, question_texts: dict,
                                        question_data: pd.DataFrame) -> str:
     """Generate 'Survey Responses' transition slide content."""
-    # Build data summary for each question
+    # Build data summary for each question (include full question context for LLM to reference)
     data_parts = []
     for qid, text in question_texts.items():
         qdata = question_data[question_data["question_id"] == qid]
@@ -542,7 +569,7 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
             continue
         top = qdata.sort_values("pct", ascending=False).head(3)
         vals = "; ".join([f"{r['answer_option'].strip()} – {r['pct']:.0f}%" for _, r in top.iterrows()])
-        data_parts.append(f"{qid}: {text[:100]}\n  Top results: {vals}")
+        data_parts.append(f"[{qid}] Question: {text[:250]}\n  Top results: {vals}")
 
     data_summary = "\n".join(data_parts)
 
@@ -555,7 +582,8 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
 
 Section name: "{section_name}"
 
-Data for this section (per question, with top answer options and percentages):
+Data for this section (per question, with top answer options and percentages).
+The [Q7], [Q10] etc. IDs are for your reference only—do NOT include them in your output.
 {data_summary}
 
 Write 5–6 bullet points that follow THIS conceptual sequence:
@@ -567,7 +595,7 @@ Write 5–6 bullet points that follow THIS conceptual sequence:
 6. **Forward-looking context** – how these results will inform later sections, messaging, or strategy.
 
 Guidelines:
-- CRITICAL: When describing what we did or what we found, ECHO BACK THE ACTUAL QUESTION asked. Do NOT say "In Q7 65% said X, in Q8 55% said Y." Instead weave in the question context: e.g., "When asked about [actual question topic], 65% said X. Among those asked [next question topic], 55% said Y." The context of what we asked matters and must be woven into the text.
+- CRITICAL – NO QUESTION NUMBERS: NEVER write Q7, Q10, Q9, or any question IDs. Readers must NOT need to look at question slides. ALWAYS use the question context instead: e.g., "When asked about favorability of Tom Malinowski, 60% said very favorable" NOT "60% in Q10 said very favorable". Weave in what was asked (the topic, figure, or concept) so the text stands alone.
 - Use key percentages from the data where helpful (e.g., “around 6 in 10”, or explicit % when clear).
 - Do NOT invent any new numbers or options beyond what appears in the data summary above.
 - Write as clean bullet points (start each line with "• ").

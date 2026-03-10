@@ -126,14 +126,14 @@ def validate_output(pptx_path, original_slide_count, num_sections):
     else:
         print("  [OK] All placeholders replaced")
 
-    # Check 2: Slide count
-    expected = original_slide_count + (2 * num_sections)
+    # Check 2: Slide count (allow extra for overflow continuation slides)
+    expected_min = original_slide_count + (2 * num_sections)
     actual = len(prs.slides)
-    if actual == expected:
+    if actual >= expected_min:
         print(f"  [OK] Slide count correct: {actual}")
     else:
-        issues.append(f"Slide count: expected {expected}, got {actual}")
-        print(f"  [!] Slide count: expected {expected}, got {actual}")
+        issues.append(f"Slide count: expected at least {expected_min}, got {actual}")
+        print(f"  [!] Slide count: expected at least {expected_min}, got {actual}")
 
     # Check 3: Transition slides per section (only if Pass 3 ran)
     if num_sections > 0:
@@ -153,23 +153,25 @@ def validate_output(pptx_path, original_slide_count, num_sections):
             for j, (start_idx, section_name) in enumerate(section_indices):
                 end_idx = section_indices[j + 1][0] if j + 1 < len(section_indices) else len(prs.slides)
 
-                # Transition slides use section name only (no "Questions Asked" / "Survey Responses")
+                # Transition slides use section name only (allow 2+ for overflow continuation)
                 transition_slides = []
-                for k in range(start_idx + 1, min(start_idx + 3, end_idx)):
+                for k in range(start_idx + 1, end_idx):
                     title = _get_title(prs.slides[k])
                     if title == section_name:
                         transition_slides.append(k + 1)
+                    else:
+                        break  # stop at first non-transition slide
 
-                if len(transition_slides) != 2:
+                if len(transition_slides) < 2:
                     issues.append(
-                        f"Section '{section_name}' expects 2 transition slides; "
+                        f"Section '{section_name}' expects at least 2 transition slides; "
                         f"found {len(transition_slides)} "
                         f"(slides: {transition_slides or 'none'})"
                     )
                 else:
                     print(
                         f"  [OK] Section '{section_name}': "
-                        f"transition slides on slides {transition_slides[0]} and {transition_slides[1]}"
+                        f"{len(transition_slides)} transition slide(s) on slides {transition_slides}"
                     )
 
                 # Character-count check (<= 1000 chars) on transition slides only
