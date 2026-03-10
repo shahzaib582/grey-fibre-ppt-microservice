@@ -251,21 +251,6 @@ def apply_style_to_run(run, style: dict, force_bold: bool | None = None) -> None
             pass
 
 
-def _remove_paragraph_bullet(para) -> None:
-    """Remove bullet from paragraph by adding a:buNone to paragraph properties."""
-    from lxml import etree
-    from pptx.oxml.ns import qn
-    p = para._p
-    pPr = p.find(qn("a:pPr"))
-    if pPr is None:
-        pPr = etree.SubElement(p, qn("a:pPr"))
-    for bullet in ("a:buChar", "a:buAutoNum", "a:buBlip", "a:buNone"):
-        existing = pPr.find(qn(bullet))
-        if existing is not None:
-            pPr.remove(existing)
-    pPr.append(etree.Element(qn("a:buNone")))
-
-
 def replace_placeholder_in_shape(shape, new_text: str) -> bool:
     """
     Replace {Insert Finding Here} placeholder with new_text,
@@ -328,7 +313,6 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             run.font.color.rgb = font_color
 
         # Add additional paragraphs for remaining lines
-        from lxml import etree
         from pptx.oxml.ns import qn
         for line in lines[1:]:
             new_p = copy.deepcopy(para._p)
@@ -339,19 +323,9 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             new_r = copy.deepcopy(run._r)
             new_r.text = line
             new_p.append(new_r)
-            # Remove bullet from copied paragraph
-            new_pPr = new_p.find(qn("a:pPr"))
-            if new_pPr is None:
-                new_pPr = etree.SubElement(new_p, qn("a:pPr"))
-            for bullet in ("a:buChar", "a:buAutoNum", "a:buBlip", "a:buNone"):
-                existing = new_pPr.find(qn(bullet))
-                if existing is not None:
-                    new_pPr.remove(existing)
-            new_pPr.append(etree.Element(qn("a:buNone")))
             # Insert after current paragraph
             para._p.addnext(new_p)
 
-        _remove_paragraph_bullet(para)
         return True
 
     return False
@@ -392,7 +366,6 @@ def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = No
     if style:
         apply_style_to_run(run, style)
 
-    _remove_paragraph_bullet(p0)
     return True
 
 
