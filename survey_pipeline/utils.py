@@ -479,22 +479,33 @@ def call_llm(system_prompt: str, user_prompt: str, model: str = "gpt-4.1-mini", 
 
 
 def generate_restatement(bullets: str) -> str:
-    """Generate a single restatement sentence from bullet points."""
+    """Generate a single neutral polling-style finding sentence."""
+    
     system = (
-        "You are an executive-level political survey analyst writing for senior decision-makers. "
-        "Write exactly ONE expressive sentence that synthesizes the key story in the data. "
-        "Use an analytical, research-oriented tone: explain what the finding implies or why it matters, "
-        "not just restate the numbers. Use comparative, interpretive phrasing (e.g., 'is rated X while Y...'), "
-        "stay factual and executive-neutral, and must keep under 35 words. Do not invent any numbers. "
-        "When citing results, echo the question context (what was asked) rather than referring to question numbers like Q7, Q8."
+        "You are writing a KEY FINDING sentence for a professional polling deck. "
+        "Your job is to report the results clearly and neutrally, not interpret them."
     )
-    user = f"""Write EXACTLY ONE sentence (max 35 words) summarizing these survey results.
 
-Match the analytical flow of a research finding: purpose/importance and what it implies, not just survey metadata.
-Describe who is higher/lower, what stands out most, and any clear patterns—in a way that supports interpretation and decisions.
-Do not add new numbers; only use the numbers already shown.
+    user = f"""
+Write EXACTLY ONE sentence summarizing these survey results.
 
-{bullets}"""
+Rules:
+- Lead with the highest percentage result
+- Report the ranking of the top responses
+- Use neutral descriptive language
+- Do NOT interpret the data
+- Do NOT explain implications
+- Do NOT use words like: notably, significantly, dramatically, pronounced, suggesting, indicating
+- Only report what the numbers show
+- Maximum 30 words
+- Do NOT invent numbers
+
+Survey results:
+{bullets}
+
+Output ONLY the sentence.
+"""
+
     return call_llm(system, user)
 
 
