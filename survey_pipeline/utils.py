@@ -298,6 +298,17 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             r_elem = run._r
             r_elem.getparent().remove(r_elem)
 
+        # Gap after line below heading
+        if para_idx == 0:
+            # First para: use margin_top (space_before ignored by PowerPoint)
+            try:
+                current_pt = tf.margin_top.pt if tf.margin_top else 0
+            except (AttributeError, TypeError):
+                current_pt = 0
+            tf.margin_top = Pt(current_pt + 14)
+        else:
+            para.space_before = Pt(14)
+
         # Set first line in the existing paragraph
         run = para.add_run()
         run.text = lines[0]
@@ -366,6 +377,12 @@ def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = No
     if style:
         apply_style_to_run(run, style)
 
+    # Gap after line below heading: use margin_top (space_before is ignored for first para in PowerPoint)
+    try:
+        current_pt = tf.margin_top.pt if tf.margin_top else 0
+    except (AttributeError, TypeError):
+        current_pt = 0
+    tf.margin_top = Pt(current_pt + 14)
     return True
 
 

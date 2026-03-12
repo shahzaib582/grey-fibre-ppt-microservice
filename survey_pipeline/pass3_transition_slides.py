@@ -244,7 +244,7 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
     width = slide_width - left - right_margin
     title_top = Inches(0.55)
     title_height = Inches(0.5)
-    body_top = Inches(1.15)
+    body_top = Inches(1.15) + Pt(14)  # Extra space after line below heading
     body_height_max = slide_height - int(body_top) - int(footer_clearance)
     body_height = min(int(Inches(5.5)), body_height_max)
 
@@ -253,7 +253,8 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
     if body_shape is None or not getattr(body_shape, "has_text_frame", False):
         body_shape = slide.shapes.add_textbox(left, body_top, width, body_height)
     else:
-        # Constrain layout body shape so text doesn't touch footer
+        # Add space after line below heading; constrain height for footer
+        body_shape.top = int(body_shape.top) + int(Pt(14))
         body_max_for_layout = slide_height - int(body_shape.top) - int(footer_clearance)
         if body_shape.height > body_max_for_layout:
             body_shape.height = body_max_for_layout
@@ -265,6 +266,7 @@ def create_transition_slide(prs, slide_index, title_text, body_text, ref_slide=N
         tf.word_wrap = True
         p = tf.paragraphs[0]
         p.text = title_text
+        p.space_after = Pt(14)  # Space after line below heading
         # Apply key-finding style to the title as well, but force bold
         if p.runs and key_style:
             apply_style_to_run(p.runs[0], key_style, force_bold=True)
@@ -354,7 +356,8 @@ def _set_body_content(text_frame, body_text, key_style=None):
 
 def _replace_key_findings_with_section(prs):
     """Replace 'Key Findings' with section name on all slides in each section.
-    Replaces text in-place within runs to preserve font color, family, and size."""
+    Replaces text in-place within runs to preserve font color, family, and size.
+    Also adds space after the heading line on key findings content slides (template)."""
     section_ranges = []
     for idx, slide in enumerate(prs.slides):
         sec_name = is_section_divider(slide)
@@ -364,6 +367,7 @@ def _replace_key_findings_with_section(prs):
         end_idx = section_ranges[j + 1][0] if j + 1 < len(section_ranges) else len(prs.slides)
         for k in range(start_idx, end_idx):
             slide = prs.slides[k]
+            title_shape = None
             for shape in slide.shapes:
                 if not shape.has_text_frame:
                     continue
@@ -373,6 +377,34 @@ def _replace_key_findings_with_section(prs):
                         if "key findings" in run.text.lower():
                             run.text = run.text.replace("Key Findings", section_name)
                             run.text = run.text.replace("key findings", section_name)
+                            para.space_after = Pt(14)  # Space after line below heading
+                            title_shape = shape
+                            # If title and body are in same shape, add space_before to next para
+                            paras = list(tf.paragraphs)
+                            para_idx = next((i for i, p in enumerate(paras) if p is para), -1)
+                            if para_idx >= 0 and para_idx + 1 < len(paras):
+                                paras[para_idx + 1].space_before = Pt(14)
+                            break
+                    if title_shape is not None:
+                        break
+                if title_shape is not None:
+                    break
+            # Key findings content slides: title and body are separate shapes; move body down
+            if title_shape is not None:
+                title_bottom = int(title_shape.top) + int(title_shape.height)
+                candidate = None
+                for shape in slide.shapes:
+                    if shape is title_shape or not getattr(shape, "has_text_frame", False):
+                        continue
+                    if getattr(shape, "top", None) is None:
+                        continue
+                    top = int(shape.top)
+                    if top >= title_bottom - 5000:  # Below or slightly overlapping
+                        if candidate is None or top < int(candidate.top):
+                            candidate = shape
+                if candidate is not None:
+                    candidate.top = int(candidate.top) + int(Pt(14))
+                    # Gap after line: margin_top set in Pass 2 (space_before ignored for first para)
 
 
 def move_slide_to_index(prs, slide, target_index):
