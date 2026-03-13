@@ -12,7 +12,7 @@ from pptx.enum.text import PP_ALIGN
 
 PLACEHOLDER = "{Insert Finding Here}"
 
-# ── Section divider names (order matters for detection) ──
+# ── Section divider names (extend for known templates; new sections auto-detected) ──
 SECTION_NAMES = [
     "Mood",
     "Favorability",
@@ -133,7 +133,9 @@ def format_values_grouped(ai_long: pd.DataFrame, question_ids: list, top_k: int 
         rows = select_top_rows(ai_long, qid, top_k=top_k, exclude_net=exclude_net)
         if rows.empty:
             continue
-        q_text = rows.iloc[0]["question_text"]
+        row = rows.iloc[0]
+        q_text = row.get("question_text", qid) if "question_text" in row.index else qid
+        q_text = str(q_text).strip() if pd.notna(q_text) and str(q_text).strip() else qid
         # Shorten question text for display
         short_q = q_text[:80] + "..." if len(q_text) > 80 else q_text
         vals = format_values(rows, pct_decimals=pct_decimals)
@@ -251,6 +253,29 @@ def apply_style_to_run(run, style: dict, force_bold: bool | None = None) -> None
             pass
 
 
+def _apply_bullet_formatting(paragraph, extra_marL_pt: float = 8):
+    """
+    Match transition slide bullet formatting: space between bullet and text (marL),
+    and bullet color follows text (buClrTx).
+    """
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    p_el = paragraph._p
+    pPr = p_el.find(qn("a:pPr"))
+    if pPr is None:
+        pPr = etree.SubElement(p_el, qn("a:pPr"))
+    # Space between bullet and text (like transition slides)
+    current = pPr.get("marL")
+    current_emu = int(current) if current else 0
+    extra_emu = int(Pt(extra_marL_pt))
+    pPr.set("marL", str(current_emu + extra_emu))
+    # Bullet color follows text (match transition slides)
+    for tag in (qn("a:buClr"), qn("a:buClrTx")):
+        for el in list(pPr.findall(tag)):
+            pPr.remove(el)
+    etree.SubElement(pPr, qn("a:buClrTx"))
+
+
 def replace_placeholder_in_shape(shape, new_text: str) -> bool:
     """
     Replace {Insert Finding Here} placeholder with new_text,
@@ -309,9 +334,10 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
         else:
             para.space_before = Pt(14)
 
-        # Set first line in the existing paragraph
+        # Set first line in the existing paragraph (leading space for bullet-text gap)
+        para.level = 0
         run = para.add_run()
-        run.text = lines[0]
+        run.text = " " + lines[0]
         if font_name:
             run.font.name = font_name
         if font_size:
@@ -332,11 +358,12 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
                 new_p.remove(r)
             # Add a run with the text
             new_r = copy.deepcopy(run._r)
-            new_r.text = line
+            new_r.text = " " + line
             new_p.append(new_r)
             # Insert after current paragraph
             para._p.addnext(new_p)
 
+        _apply_bullet_formatting(para)
         return True
 
     return False
@@ -369,20 +396,23 @@ def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = No
     for r in list(first_p.findall(qn("a:r"))):
         first_p.remove(r)
 
-    # python-pptx paragraph API for adding a run
     p0 = tf.paragraphs[0]
+    p0.level = 0  # Bullet level (like transition slides)
     run = p0.add_run()
-    run.text = text
+    # Space between bullet and text (template provides bullet; " " matches transition spacing)
+    run.text = " " + text
 
     if style:
         apply_style_to_run(run, style)
 
-    # Gap after line below heading: use margin_top (space_before is ignored for first para in PowerPoint)
+    # Gap after line below heading: use margin_top (space_before ignored for first para in PowerPoint)
     try:
         current_pt = tf.margin_top.pt if tf.margin_top else 0
     except (AttributeError, TypeError):
         current_pt = 0
-    tf.margin_top = Pt(current_pt + 14)
+    tf.margin_top = Pt(current_pt + 20)  # Match transition slides
+
+    _apply_bullet_formatting(p0)
     return True
 
 
@@ -395,10 +425,14 @@ def is_section_divider(slide) -> str | None:
     Check if a slide is a section divider.
     Returns the section name if it is, None otherwise.
 
-    Section dividers are identified as slides with a single large title
-    matching one of the known section names.
+    Section dividers are identified by:
+    1. Slides whose title matches a known SECTION_NAMES entry
+    2. OR slides that look like dividers: single title, no chart/table, not a question slide
     """
     texts = []
+    has_chart = any(getattr(s, "has_chart", False) for s in slide.shapes)
+    has_table = any(getattr(s, "has_table", False) for s in slide.shapes)
+
     for shape in slide.shapes:
         if shape.has_text_frame:
             t = shape.text_frame.text.strip()
@@ -408,14 +442,26 @@ def is_section_divider(slide) -> str | None:
     if not texts:
         return None
 
-    # Check if any text matches a known section name
+    # 1. Check if any text matches a known section name
     for text in texts:
         clean = text.strip()
         for section in SECTION_NAMES:
             if clean.lower() == section.lower():
                 return section
 
-    return None
+    # 2. Dynamic detection: single title only, no chart/table, not a question slide
+    if has_chart or has_table:
+        return None
+    if len(texts) != 1:  # Divider has exactly one text block (section name only)
+        return None
+    primary = texts[0].strip()
+    if not primary or len(primary) > 80:  # Too long for a section title
+        return None
+    if parse_question_spec(primary) is not None:  # "Question 5:" etc.
+        return None
+    if re.search(r"Q\d+", primary, re.IGNORECASE):  # Contains Q7, Q8, etc.
+        return None
+    return primary
 
 
 def get_section_questions(prs, section_slide_idx: int, ai_long: pd.DataFrame) -> dict:
@@ -456,12 +502,14 @@ def get_section_questions(prs, section_slide_idx: int, ai_long: pd.DataFrame) ->
     # Get data
     question_data = ai_long[ai_long["question_id"].isin(unique_qids)].copy()
 
-    # Get question texts
+    # Get question texts (fallback to qid if column missing or empty)
     question_texts = {}
     for qid in unique_qids:
         rows = ai_long[ai_long["question_id"] == qid]
         if not rows.empty:
-            question_texts[qid] = rows.iloc[0]["question_text"]
+            row = rows.iloc[0]
+            qt = row.get("question_text", qid) if "question_text" in row.index else qid
+            question_texts[qid] = str(qt).strip() if pd.notna(qt) and str(qt).strip() else qid
 
     return {
         "question_ids": unique_qids,

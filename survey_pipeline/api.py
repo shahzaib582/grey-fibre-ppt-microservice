@@ -25,7 +25,7 @@ load_dotenv()
 
 # Bump this string whenever you deploy a new version so you can
 # verify which build your n8n workflow is hitting.
-API_VERSION = "2026-03-10-v1"
+API_VERSION = "Version 1.0 (13-03-2026)"
 
 
 def _sanitize_filename(name: str) -> str:

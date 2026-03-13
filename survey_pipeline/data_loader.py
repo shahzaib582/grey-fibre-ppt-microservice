@@ -38,7 +38,7 @@ def load_ai_long(data_path: str) -> pd.DataFrame:
 
 # Canonical column names and possible aliases (exact match, case-insensitive)
 _AI_LONG_COL_MAP = [
-    ("question_id", ["question_id", "question id", "qid", "question_num", "question number"]),
+    ("question_id", ["question_id", "question id", "question", "qid", "question_num", "question number"]),
     ("question_text", ["question_text", "question text", "question_iuestion_te", "qtext"]),
     ("base_n", ["base_n", "base n"]),
     ("answer_option", ["answer_option", "answer option", "swer_opti", "answer", "response"]),
@@ -79,16 +79,16 @@ def _normalize_ai_long_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     # Build question_id from numeric column if missing
     if "question_id" not in df.columns:
-        for num_col in ["question_number", "question number", "question_num", "ble_numb", "qnum", "num"]:
+        for num_col in ["question_number", "question number", "question_num", "question", "ble_numb", "qnum", "num"]:
             if num_col in df.columns:
                 df["question_id"] = df[num_col].astype(str).str.replace(r"\.0$", "", regex=True).map(lambda x: f"Q{x}" if x and x != "nan" else None)
                 break
         if "question_id" not in df.columns:
             raise ValueError("ai_long sheet must have 'question_id' or a numeric question column (e.g. question_number)")
 
-    # Ensure string type and Q-prefix for question_id (e.g. 1 -> Q1, Q2 -> Q2)
-    df["question_id"] = df["question_id"].astype(str).str.strip()
-    df["question_id"] = df["question_id"].str.replace(r"^(\d+)$", r"Q\1", regex=True)
+    # Ensure string type and Q-prefix for question_id (handles 1,2,3 or Q1,Q2,Q3 or q1,q2,q3)
+    df["question_id"] = df["question_id"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    df["question_id"] = df["question_id"].str.replace(r"^q?(\d+)$", r"Q\1", regex=True, flags=re.IGNORECASE)
     df = df[df["question_id"].str.match(r"^Q\d+$", na=False)].copy()
 
     # Optional columns: add if missing
@@ -98,6 +98,14 @@ def _normalize_ai_long_sheet(df: pd.DataFrame) -> pd.DataFrame:
         df["is_top3"] = df["rank_pct_desc"] <= 3
     if "is_net" not in df.columns and "answer_option" in df.columns:
         df["is_net"] = df["answer_option"].astype(str).str.contains("NET", case=False, na=False)
+    if "question_text" not in df.columns:
+        df["question_text"] = df["question_id"].astype(str)
+
+    # Normalize pct: if values are decimals (0–1), convert to 0–100
+    if "pct" in df.columns:
+        pct_vals = pd.to_numeric(df["pct"], errors="coerce").dropna()
+        if len(pct_vals) > 0 and pct_vals.max() <= 1.0 and pct_vals.min() >= 0:
+            df["pct"] = df["pct"].astype(float) * 100.0
 
     return df
 

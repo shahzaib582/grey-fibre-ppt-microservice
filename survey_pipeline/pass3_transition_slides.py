@@ -403,8 +403,7 @@ def _replace_key_findings_with_section(prs):
                         if candidate is None or top < int(candidate.top):
                             candidate = shape
                 if candidate is not None:
-                    candidate.top = int(candidate.top) + int(Pt(14))
-                    # Gap after line: margin_top set in Pass 2 (space_before ignored for first para)
+                    candidate.top = int(candidate.top) + int(Pt(20))  # Gap after line (match transition slides)
 
 
 def move_slide_to_index(prs, slide, target_index):
