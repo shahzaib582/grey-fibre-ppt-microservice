@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import copy
+import pandas as pd
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.enum.text import PP_ALIGN
@@ -26,11 +27,13 @@ from .utils import (
     PLACEHOLDER,
     is_section_divider,
     get_section_questions,
+    get_section_name_for_slide,
     get_slide_text,
     parse_question_spec,
     get_question_ids,
     generate_questions_asked_content,
     generate_survey_responses_content,
+    generate_multi_question_summary_content,
     call_llm,
     ensure_key_finding_style,
     apply_style_to_run,
@@ -354,6 +357,67 @@ def _set_body_content(text_frame, body_text, key_style=None):
             apply_style_to_run(p.runs[0], key_style)
 
 
+def _update_table_of_contents(prs, section_names: list[str], key_style: dict | None = None):
+    """Update the Table of Contents slide with actual section titles from the presentation.
+    Uses key_style (same as transition slides) for font color, style, and size."""
+    toc_slide = None
+    body_shape = None
+
+    for slide in prs.slides:
+        full_text = get_slide_text(slide).lower()
+        if "table of contents" not in full_text:
+            continue
+
+        toc_slide = slide
+        # Find body shape: either a separate shape with the list, or the same shape as title (para 2+)
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            t = shape.text_frame.text.strip()
+            if not t:
+                continue
+            lines = [ln.strip() for ln in t.split("\n") if ln.strip()]
+            first_line = lines[0].lower() if lines else ""
+            if first_line == "table of contents":
+                if len(lines) > 1:
+                    # Title + list in same shape; use this shape, replace content after title
+                    body_shape = shape
+                    break
+                continue
+            # Separate body shape with the list
+            body_shape = shape
+            break
+
+        if body_shape is not None:
+            break
+
+    if toc_slide is None or body_shape is None:
+        return
+
+    tf = body_shape.text_frame
+
+    # Check if title and body are in same shape
+    full_text = tf.text.strip()
+    if full_text.lower().startswith("table of contents"):
+        # Keep title para, replace body paras with actual section names
+        paras = list(tf.paragraphs)
+        txBody = tf._txBody
+        for p in paras[1:]:
+            txBody.remove(p._p)
+        for name in section_names:
+            p = tf.add_paragraph()
+            p.text = name
+            p.level = 0
+            p.space_after = Pt(6)
+            if key_style and p.runs:
+                apply_style_to_run(p.runs[0], key_style)
+    else:
+        # Body in separate shape (bullet format to match TOC style)
+        body_text = "\n".join(f"• {name}" for name in section_names)
+        tf.text = ""
+        _set_body_content(tf, body_text, key_style=key_style)
+
+
 def _replace_key_findings_with_section(prs):
     """Replace 'Key Findings' with section name on all slides in each section.
     Replaces text in-place within runs to preserve font color, family, and size.
@@ -377,13 +441,13 @@ def _replace_key_findings_with_section(prs):
                         if "key findings" in run.text.lower():
                             run.text = run.text.replace("Key Findings", section_name)
                             run.text = run.text.replace("key findings", section_name)
-                            para.space_after = Pt(14)  # Space after line below heading
+                            para.space_after = Pt(6)  # Minimal gap after line (avoid summary colliding with chart)
                             title_shape = shape
                             # If title and body are in same shape, add space_before to next para
                             paras = list(tf.paragraphs)
                             para_idx = next((i for i, p in enumerate(paras) if p is para), -1)
                             if para_idx >= 0 and para_idx + 1 < len(paras):
-                                paras[para_idx + 1].space_before = Pt(14)
+                                paras[para_idx + 1].space_before = Pt(6)
                             break
                     if title_shape is not None:
                         break
@@ -403,7 +467,7 @@ def _replace_key_findings_with_section(prs):
                         if candidate is None or top < int(candidate.top):
                             candidate = shape
                 if candidate is not None:
-                    candidate.top = int(candidate.top) + int(Pt(20))  # Gap after line (match transition slides)
+                    candidate.top = int(candidate.top) + int(Pt(6))  # Minimal gap (avoid summary colliding with chart)
 
 
 def move_slide_to_index(prs, slide, target_index):
@@ -492,6 +556,11 @@ def main():
         print("[WARN] No section dividers found. Nothing to do.")
         prs.save(args.out)
         return
+
+    # Update Table of Contents slide with actual section titles (use transition slide style)
+    section_names = [s["name"] for s in sections_found]
+    _update_table_of_contents(prs, section_names, key_style=key_style)
+    print(f"Updated Table of Contents with {len(section_names)} section(s)")
 
     # Use the actual Key Findings CONTENT slide (light grey + blue footer).
     # Exclude the dark-blue "Key Findings" divider. Content slides have a
@@ -584,6 +653,49 @@ def main():
 
         total = len(response_chunks) + len(question_chunks)
         print(f"  [OK] {total} transition slide(s) inserted after '{section_name}'")
+
+    # Step 2.5: Insert multi-question summary slides (work backwards to preserve indices)
+    multi_q_slides = []
+    for i, slide in enumerate(prs.slides):
+        if is_section_divider(slide):
+            continue
+        slide_text = get_slide_text(slide)
+        qspec = parse_question_spec(slide_text)
+        if not qspec:
+            continue
+        qids = get_question_ids(qspec)
+        if qspec[0] != "range" and len(qids) <= 1:
+            continue
+        section_name = get_section_name_for_slide(prs, i)
+        question_texts = {}
+        for qid in qids:
+            rows = ai_long[ai_long["question_id"] == qid]
+            if not rows.empty:
+                qt = rows.iloc[0].get("question_text", qid) if "question_text" in rows.columns else qid
+                question_texts[qid] = str(qt).strip() if pd.notna(qt) and str(qt).strip() else qid
+        question_data = ai_long[ai_long["question_id"].isin(qids)].copy()
+        multi_q_slides.append((i, section_name, question_texts, question_data))
+
+    for slide_idx, section_name, question_texts, question_data in reversed(multi_q_slides):
+        try:
+            summary_content = generate_multi_question_summary_content(
+                section_name, question_texts, question_data
+            )
+        except Exception as e:
+            print(f"  [ERROR] Multi-question summary at slide {slide_idx + 1}: {e}")
+            summary_content = "• Summary of questions and findings for this slide."
+        slide_summary = create_transition_slide(
+            prs,
+            slide_idx + 1,
+            section_name,
+            summary_content,
+            ref_slide=keyfinding_slide,
+            key_style=key_style,
+            layout=keyfinding_layout,
+        )
+        move_slide_to_index(prs, slide_summary, slide_idx + 1)
+        slides_inserted += 1
+        print(f"  [OK] Multi-question summary slide inserted after slide {slide_idx + 1}")
 
     # Step 3: Replace "Key Findings" with section name on all slides in each section
     _replace_key_findings_with_section(prs)

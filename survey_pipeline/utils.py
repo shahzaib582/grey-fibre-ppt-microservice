@@ -12,6 +12,22 @@ from pptx.enum.text import PP_ALIGN
 
 PLACEHOLDER = "{Insert Finding Here}"
 
+
+def _strip_question_ids(text: str) -> str:
+    """Remove question IDs (Q1, Q7, etc.) from LLM output—readers must not need to look at question slides."""
+    if not text or not isinstance(text, str):
+        return text
+    # "In Q7, " or "in Q7, " at start
+    text = re.sub(r"\b[Ii]n\s+Q\d+,\s*", "", text, flags=re.IGNORECASE)
+    # "Q7, " or "Q7: " anywhere
+    text = re.sub(r"\bQ\d+\s*[,:\s]+\s*", " ", text, flags=re.IGNORECASE)
+    # " (Q7)" or "(Q7)"
+    text = re.sub(r"\s*\(Q\d+\)\s*", " ", text, flags=re.IGNORECASE)
+    # "Q7 " at start of line/bullet
+    text = re.sub(r"(^|\n)\s*Q\d+\s+", r"\1", text, flags=re.IGNORECASE)
+    return re.sub(r"  +", " ", text).strip()
+
+
 # ── Section divider names (extend for known templates; new sections auto-detected) ──
 SECTION_NAMES = [
     "Mood",
@@ -323,16 +339,16 @@ def replace_placeholder_in_shape(shape, new_text: str) -> bool:
             r_elem = run._r
             r_elem.getparent().remove(r_elem)
 
-        # Gap after line below heading
+        # Minimal gap after line below heading (avoid pushing summary into chart)
         if para_idx == 0:
             # First para: use margin_top (space_before ignored by PowerPoint)
             try:
                 current_pt = tf.margin_top.pt if tf.margin_top else 0
             except (AttributeError, TypeError):
                 current_pt = 0
-            tf.margin_top = Pt(current_pt + 14)
+            tf.margin_top = Pt(current_pt + 6)
         else:
-            para.space_before = Pt(14)
+            para.space_before = Pt(6)
 
         # Set first line in the existing paragraph (leading space for bullet-text gap)
         para.level = 0
@@ -405,12 +421,12 @@ def set_shape_text_to_single_paragraph(shape, text: str, style: dict | None = No
     if style:
         apply_style_to_run(run, style)
 
-    # Gap after line below heading: use margin_top (space_before ignored for first para in PowerPoint)
+    # Minimal gap after line below heading (avoid pushing summary into chart)
     try:
         current_pt = tf.margin_top.pt if tf.margin_top else 0
     except (AttributeError, TypeError):
         current_pt = 0
-    tf.margin_top = Pt(current_pt + 20)  # Match transition slides
+    tf.margin_top = Pt(current_pt + 6)
 
     _apply_bullet_formatting(p0)
     return True
@@ -518,6 +534,19 @@ def get_section_questions(prs, section_slide_idx: int, ai_long: pd.DataFrame) ->
     }
 
 
+def get_section_name_for_slide(prs, slide_idx: int) -> str:
+    """
+    Get the section name for a slide at the given index.
+    Looks backwards for the nearest section divider.
+    """
+    slides = list(prs.slides)
+    for i in range(slide_idx, -1, -1):
+        sec = is_section_divider(slides[i])
+        if sec:
+            return sec
+    return "Key Findings"
+
+
 # ═══════════════════════════════════════════════════════════
 #  LLM helpers
 # ═══════════════════════════════════════════════════════════
@@ -543,27 +572,39 @@ def call_llm(system_prompt: str, user_prompt: str, model: str = "gpt-4.1-mini", 
     return resp.choices[0].message.content.strip()
 
 
-def generate_restatement(bullets: str) -> str:
-    """Generate a single neutral polling-style finding sentence."""
-    
+def generate_restatement(bullets: str, question_context: str | None = None) -> str:
+    """Generate a one-line chart callout that incorporates the question and editorializes in the client's favor."""
     system = (
-        "You are writing a KEY FINDING sentence for a professional polling deck. "
-        "Your job is to report the results clearly and neutrally, not interpret them."
+        "You are writing a one-line KEY FINDING callout for a professional polling deck. "
+        "Write in past tense (e.g., '32% said' not '32% say'). "
+        "Write in a slightly less formal, conversational tone. "
+        "Incorporate the question context into your sentence so the finding reads in context. "
+        "Editorialize subtly in the client's favor where appropriate—frame results positively without distorting the data."
     )
+
+    question_block = ""
+    if question_context and question_context.strip():
+        question_block = f"""
+The survey question (echo this context in your summary):
+\"\"\"{question_context.strip()}\"\"\"
+
+Example: If the question is 'In a typical week, how often do you ride the New York City subway or buses?', 
+write something like: 'In a typical week, 32% said they rode the New York City subway or buses 3-4 days per week, and 26% rode 5 or more days per week, 26% rode 1-2 days per week.'
+Do NOT say 'the most common response is X'—instead weave the question context into the sentence.
+"""
 
     user = f"""
 Write EXACTLY ONE sentence summarizing these survey results.
-
+{question_block}
 Rules:
-- Lead with the highest percentage result
-- Report the ranking of the top responses
-- Use neutral descriptive language
-- Do NOT interpret the data
-- Do NOT explain implications
-- Do NOT use words like: notably, significantly, dramatically, pronounced, suggesting, indicating
-- Only report what the numbers show
-- Maximum 30 words
-- Do NOT invent numbers
+- Write in past tense (e.g., '32% said they rode...' not '32% say they ride...')
+- Incorporate the question context into your sentence (e.g. 'In a typical week, 32% said they rode...')
+- Use a slightly less formal, conversational tone
+- Lead with the top results and percentages
+- Editorialize subtly in the client's favor where the data supports it
+- Maximum 35 words
+- Do NOT invent numbers—use only the percentages given
+- Do NOT use stiff phrases like 'the most common response is' or 'respondents indicated that'
 
 Survey results:
 {bullets}
@@ -571,7 +612,8 @@ Survey results:
 Output ONLY the sentence.
 """
 
-    return call_llm(system, user)
+    out = call_llm(system, user)
+    return _strip_question_ids(out)
 
 
 def generate_questions_asked_content(section_name: str, question_texts: dict) -> str:
@@ -580,8 +622,8 @@ def generate_questions_asked_content(section_name: str, question_texts: dict) ->
 
     system = (
         "You are a political survey analyst writing for senior decision-makers. "
-        "Explain, in analytic language, what this section of the survey is measuring and why it matters. "
-        "Do NOT restate the exact question wording; summarize concepts."
+        "Explain, in analytic language, what this section of the survey measured and why it mattered. "
+        "Write in past tense. Do NOT restate the exact question wording; summarize concepts."
     )
     user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
 
@@ -599,12 +641,14 @@ Write 5–6 bullet points that follow THIS conceptual sequence:
 6. **Context for later findings** – how these questions set up or contextualize findings that appear later in the deck.
 
 Guidelines:
+- Write in past tense (e.g., 'This section measured...' not 'This section measures...').
 - Focus on analytic **content structure**, not formatting. Write each bullet as a short narrative sentence that explains the concept—not a fragment or survey-question label.
 - NO numeric values. NEVER use question numbers (Q7, Q10, etc.); use the question topic/concept instead so readers do not need to look at question slides.
 - Write as clean bullet points (start each line with "• ").
 - Keep total length under 900 characters."""
 
-    return call_llm(system, user)
+    out = call_llm(system, user)
+    return _strip_question_ids(out)
 
 
 def generate_survey_responses_content(section_name: str, question_texts: dict,
@@ -625,6 +669,7 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
     system = (
         "You are a political survey analyst preparing executive briefing slides. "
         "Summarize survey RESULTS in a structured, analytic way for senior readers. "
+        "Write in past tense (e.g., 'respondents said', 'the survey showed', '60% indicated'). "
         "Stay strictly faithful to the numbers provided."
     )
     user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
@@ -644,10 +689,59 @@ Write 5–6 bullet points that follow THIS conceptual sequence:
 6. **Forward-looking context** – how these results will inform later sections, messaging, or strategy.
 
 Guidelines:
+- Write in past tense (e.g., 'respondents said', 'the survey showed', '60% indicated').
 - CRITICAL – NO QUESTION NUMBERS: NEVER write Q7, Q10, Q9, or any question IDs. Readers must NOT need to look at question slides. ALWAYS use the question context instead: e.g., "When asked about favorability of Tom Malinowski, 60% said very favorable" NOT "60% in Q10 said very favorable". Weave in what was asked (the topic, figure, or concept) so the text stands alone.
 - Use key percentages from the data where helpful (e.g., “around 6 in 10”, or explicit % when clear).
 - Do NOT invent any new numbers or options beyond what appears in the data summary above.
 - Write as clean bullet points (start each line with "• ").
 - Keep total length under 900 characters."""
 
-    return call_llm(system, user)
+    out = call_llm(system, user)
+    return _strip_question_ids(out)
+
+
+def generate_multi_question_summary_content(section_name: str, question_texts: dict,
+                                            question_data: pd.DataFrame) -> str:
+    """
+    Generate summary content for a multi-question slide: what we asked and what we concluded.
+    Same structure as key findings / transition slides: bullets with question context + results.
+    """
+    q_list = "\n".join([f"- {qid}: {text}" for qid, text in question_texts.items()])
+    data_parts = []
+    for qid, text in question_texts.items():
+        qdata = question_data[question_data["question_id"] == qid]
+        if qdata.empty:
+            continue
+        top = qdata.sort_values("pct", ascending=False).head(3)
+        vals = "; ".join([f"{r['answer_option'].strip()} – {r['pct']:.0f}%" for _, r in top.iterrows()])
+        data_parts.append(f"[{qid}] Question: {text[:250]}\n  Top results: {vals}")
+    data_summary = "\n".join(data_parts)
+
+    system = (
+        "You are a political survey analyst preparing executive briefing slides. "
+        "Write a summary slide for a multi-question slide: what we asked and what we concluded. "
+        "Write in past tense (e.g., 'we asked', 'respondents said', 'the survey showed'). "
+        "Use a slightly less formal, conversational tone. "
+        "Incorporate the question context into your sentences so findings read in context. "
+        "Stay strictly faithful to the numbers provided."
+    )
+    user = f"""You are preparing a summary slide for a multi-question slide in the "{section_name}" section.
+
+Section: "{section_name}"
+
+Questions on this slide (IDs for reference only—do NOT include them in output):
+{q_list}
+
+Data (top results per question):
+{data_summary}
+
+Write 4–6 bullet points that:
+1. Summarize what we asked (weave in question context, e.g. "When asked about X, 60% said very favorable")
+2. Summarize what we concluded (key findings with percentages)
+3. Use past tense throughout (e.g., 'we asked', 'respondents said', 'the survey showed'). Use a slightly less formal tone. Editorialize subtly in the client's favor where the data supports it.
+4. NEVER use question numbers (Q7, Q10) in output—use the question topic/concept instead.
+5. Write as clean bullet points (start each line with "• ").
+6. Keep total length under 900 characters."""
+
+    out = call_llm(system, user)
+    return _strip_question_ids(out)

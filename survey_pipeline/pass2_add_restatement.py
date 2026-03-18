@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import re
+import pandas as pd
 from pptx import Presentation
 from pptx.oxml.ns import qn
 import copy
@@ -175,9 +176,19 @@ def process_slide(slide, ai_long, key_style, top_k=3, exclude_net=True):
         bullets.append(f"- {opt} – {pct}%")
     bullet_text = "\n".join(bullets)
 
-    # Generate restatement
+    # Get question context for echoing in the summary
+    question_context = None
+    for qid in qids:
+        rows = ai_long[ai_long["question_id"] == qid]
+        if not rows.empty:
+            qt = rows.iloc[0].get("question_text", "") if "question_text" in rows.columns else ""
+            if pd.notna(qt) and str(qt).strip():
+                question_context = str(qt).strip()
+                break
+
+    # Generate restatement (incorporates question, less formal, editorializes)
     try:
-        restatement = generate_restatement(bullet_text)
+        restatement = generate_restatement(bullet_text, question_context=question_context)
     except Exception as e:
         print(f"  [ERROR] LLM call failed for {qids}: {e}")
         return False
@@ -226,6 +237,19 @@ def main():
         qspec = parse_question_spec(slide_text)
         if qspec:
             qids = get_question_ids(qspec)
+            is_multi = qspec[0] == "range" or len(qids) > 1
+            if is_multi:
+                # Multi-question: remove placeholder only; summary goes on separate slide (Pass 3)
+                removed = False
+                for shape in slide.shapes:
+                    if shape.has_text_frame and PLACEHOLDER in shape.text_frame.text:
+                        new_text = shape.text_frame.text.replace(PLACEHOLDER, "").strip()
+                        shape.text_frame.text = new_text if new_text else ""
+                        removed = True
+                if removed:
+                    print(f"Slide {i + 1}: Removed placeholder from multi-question slide {qids}")
+                    updated += 1
+                continue
             if slide_has_table(slide):
                 print(f"Slide {i + 1}: Skipping {qids} (slide has table — no summary sentence)")
                 continue
