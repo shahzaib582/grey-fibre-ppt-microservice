@@ -13,6 +13,13 @@ from pptx.enum.text import PP_ALIGN
 PLACEHOLDER = "{Insert Finding Here}"
 
 
+def _sanitize_pptx_text(text: str) -> str:
+    """Remove control chars that can corrupt PPTX XML."""
+    if not text or not isinstance(text, str):
+        return text or ""
+    return "".join(c for c in text if c == "\n" or c == "\r" or c == "\t" or ord(c) >= 32 or ord(c) == 0x2028 or ord(c) == 0x2029)
+
+
 def _strip_question_ids(text: str) -> str:
     """Remove question IDs (Q1, Q7, etc.) from LLM output—readers must not need to look at question slides."""
     if not text or not isinstance(text, str):
@@ -175,9 +182,248 @@ def get_slide_text(slide) -> str:
     return "\n".join(parts)
 
 
+def get_question_text_from_slide(slide) -> str:
+    """Get the question text from a multi-question/table slide (the shape with 'Questions X-Y:' or 'Question N:')."""
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = shape.text_frame.text.strip()
+        if not text:
+            continue
+        if re.search(r"\bQuestions?\s+\d+(\s*[-–—]\s*\d+)?\s*:", text, re.IGNORECASE):
+            return text
+    return ""
+
+
+def _find_restatement_shape(slide) -> str | None:
+    """Find the shape with the chart callout/restatement on a question slide. Returns its text or None."""
+    question_pattern = re.compile(r"\bQuestion[s]?\s+\d+", re.IGNORECASE)
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text = shape.text_frame.text.strip()
+        if not text or len(text) < 15:
+            continue
+        if question_pattern.search(text) and "Questions" not in text[:30]:
+            continue  # Skip question shape
+        if "%" in text and len(text) < 500:  # Summary-like: has %, not too long
+            return text
+    return None
+
+
+def extract_chart_callouts_from_deck(prs, ai_long: pd.DataFrame) -> list[dict]:
+    """
+    Extract one-line chart callouts (restatements) from question slides.
+    Returns list of {section, qid, question_text, summary}.
+    """
+    results = []
+    for i, slide in enumerate(prs.slides):
+        if is_section_divider(slide):
+            continue
+        slide_text = get_slide_text(slide)
+        qspec = parse_question_spec(slide_text)
+        if not qspec:
+            continue
+        qids = get_question_ids(qspec)
+        if qspec[0] == "range" or len(qids) > 1:
+            continue  # Multi-question: no single callout on slide
+        summary = _find_restatement_shape(slide)
+        if not summary:
+            continue
+        section = get_section_name_for_slide(prs, i)
+        qid = qids[0]
+        qt = ""
+        rows = ai_long[ai_long["question_id"] == qid]
+        if not rows.empty and "question_text" in rows.columns:
+            qt = str(rows.iloc[0].get("question_text", "") or "").strip()
+        results.append({"section": section, "qid": qid, "question_text": qt, "summary": summary})
+    return results
+
+
 def slide_has_placeholder(slide) -> bool:
     """Check if slide contains the placeholder text."""
     return PLACEHOLDER in get_slide_text(slide)
+
+
+def _iter_all_shapes(container):
+    """Yield all shapes including those inside groups (recursive)."""
+    from pptx.shapes.group import GroupShape
+    for shp in container.shapes:
+        yield shp
+        if isinstance(shp, GroupShape):
+            yield from _iter_all_shapes(shp)
+
+
+def _get_slide_number_shape(slide):
+    """Return the slide number placeholder shape, or None. Searches top-level and inside groups."""
+    from pptx.enum.shapes import PP_PLACEHOLDER_TYPE
+    for shp in _iter_all_shapes(slide):
+        if not getattr(shp, "is_placeholder", False):
+            continue
+        if getattr(shp, "placeholder_format", None) is None:
+            continue
+        if getattr(shp.placeholder_format, "type", None) == PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+            return shp
+    return None
+
+
+def _apply_arial_14_to_slide_number_shape(shape, force_white=False, force_not_bold=False):
+    """Set Arial 14pt font on slide number placeholder via XML defRPr/endParaRPr.
+    force_white: set text color to white (for blue/dark section divider slides).
+    force_not_bold: ensure text is not bold (for blue slides where layout may have bold)."""
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    if not getattr(shape, "has_text_frame", False):
+        return
+    txBody = shape.text_frame._txBody
+    for p in txBody.findall(qn("a:p")):
+        # Add or update defRPr for default font (Arial 14pt)
+        pPr = p.find(qn("a:pPr"))
+        if pPr is None:
+            pPr = etree.SubElement(p, qn("a:pPr"))
+        defRPr = pPr.find(qn("a:defRPr"))
+        if defRPr is None:
+            defRPr = etree.SubElement(pPr, qn("a:defRPr"))
+        defRPr.set("sz", "1400")  # 14pt
+        defRPr.set("lang", "en-US")
+        if force_not_bold:
+            defRPr.set("b", "0")
+        if force_white:
+            solid_fill = defRPr.find(qn("a:solidFill"))
+            if solid_fill is None:
+                solid_fill = etree.SubElement(defRPr, qn("a:solidFill"))
+            srgb = solid_fill.find(qn("a:srgbClr"))
+            if srgb is None:
+                srgb = etree.SubElement(solid_fill, qn("a:srgbClr"), val="FFFFFF")
+            else:
+                srgb.set("val", "FFFFFF")
+        for tag in (qn("a:latin"), qn("a:ea"), qn("a:cs")):
+            existing = defRPr.find(tag)
+            if existing is not None:
+                defRPr.remove(existing)
+            etree.SubElement(defRPr, tag, typeface="Arial")
+        # Also set endParaRPr if present (used by fields)
+        endParaRPr = p.find(qn("a:endParaRPr"))
+        if endParaRPr is not None:
+            endParaRPr.set("sz", "1400")
+            if force_not_bold:
+                endParaRPr.set("b", "0")
+            if force_white:
+                solid_fill = endParaRPr.find(qn("a:solidFill"))
+                if solid_fill is None:
+                    solid_fill = etree.SubElement(endParaRPr, qn("a:solidFill"))
+                srgb = solid_fill.find(qn("a:srgbClr"))
+                if srgb is None:
+                    etree.SubElement(solid_fill, qn("a:srgbClr"), val="FFFFFF")
+                else:
+                    srgb.set("val", "FFFFFF")
+            for tag in (qn("a:latin"), qn("a:ea"), qn("a:cs")):
+                existing = endParaRPr.find(tag)
+                if existing is not None:
+                    endParaRPr.remove(existing)
+                etree.SubElement(endParaRPr, tag, typeface="Arial")
+
+
+def _copy_slide_number_from_ref(ref_slide, dst_slide):
+    """Copy slide number placeholder from ref_slide to dst_slide. Used for section dividers with wrong layout."""
+    from pptx.enum.shapes import PP_PLACEHOLDER_TYPE
+    from pptx.oxml.ns import qn
+
+    ref_shp = _get_slide_number_shape(ref_slide)
+    if ref_shp is None:
+        return False
+
+    def _next_shape_id(sld):
+        max_id = 0
+        for shp in _iter_all_shapes(sld):
+            try:
+                sid = getattr(shp, "shape_id", None) or getattr(shp.element, "id", None)
+                if sid is not None:
+                    max_id = max(max_id, int(sid))
+            except (TypeError, ValueError):
+                pass
+        return max_id + 1
+
+    def _remap_embed_rids(el, src_part, dst_part):
+        for e in el.iter():
+            rid = e.get(qn("r:embed"))
+            if rid and src_part.rels.get(rid):
+                rel = src_part.rels[rid]
+                new_rid = dst_part.rels.get_or_add(rel.reltype, rel.target_part)
+                e.set(qn("r:embed"), new_rid)
+
+    # Only use ref_slide—layout/master copy can corrupt (cross-part rIds)
+    for src in [ref_slide]:
+        if src is None:
+            continue
+        for shp in src.shapes:
+            if not getattr(shp, "is_placeholder", False) or getattr(shp, "placeholder_format", None) is None:
+                continue
+            if getattr(shp.placeholder_format, "type", None) != PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+                continue
+            new_el = copy.deepcopy(shp.element)
+            nv_sp_pr = new_el.find(qn("p:nvSpPr"))
+            if nv_sp_pr is not None:
+                c_nv_pr = nv_sp_pr.find(qn("p:cNvPr"))
+                if c_nv_pr is not None:
+                    c_nv_pr.set("id", str(_next_shape_id(dst_slide)))
+            if src is not ref_slide:
+                _remap_embed_rids(new_el, src.part, dst_slide.part)
+            sp_tree = dst_slide.shapes._spTree
+            ext_lst = sp_tree.find(qn("p:extLst"))
+            if ext_lst is not None:
+                sp_tree.insert_element_before(new_el, qn("p:extLst"))
+            else:
+                sp_tree.append(new_el)
+            return True
+    return False
+
+
+def _remove_slide_number_placeholder(slide):
+    """Remove the slide number placeholder from a slide (including inside groups)."""
+    from pptx.enum.shapes import PP_PLACEHOLDER_TYPE
+    from pptx.oxml.ns import qn
+
+    for shp in list(_iter_all_shapes(slide)):
+        if not getattr(shp, "is_placeholder", False) or getattr(shp, "placeholder_format", None) is None:
+            continue
+        if getattr(shp.placeholder_format, "type", None) != PP_PLACEHOLDER_TYPE.SLIDE_NUMBER:
+            continue
+        parent = shp.element.getparent()
+        if parent is not None:
+            parent.remove(shp.element)
+            return True
+    return False
+
+
+def normalize_slide_numbers(prs, ref_slide=None):
+    """
+    Apply Arial 14pt to all slide number placeholders. Blue slides get white + not bold.
+    Never touch position—preserves original layout. No remove/copy for blue slides (avoids corruption).
+    """
+    if ref_slide is None:
+        for slide in prs.slides:
+            if is_section_divider(slide):
+                continue
+            if _get_slide_number_shape(slide):
+                ref_slide = slide
+                break
+    if ref_slide is None or _get_slide_number_shape(ref_slide) is None:
+        return
+
+    for slide in prs.slides:
+        shp = _get_slide_number_shape(slide)
+        # Only copy if slide has no placeholder (e.g. new transition slides)
+        if shp is None:
+            if _copy_slide_number_from_ref(ref_slide, slide):
+                shp = _get_slide_number_shape(slide)
+        if shp is None:
+            continue
+        # Apply font only—never touch position (preserves original placement, avoids corruption)
+        is_divider = is_section_divider(slide)
+        _apply_arial_14_to_slide_number_shape(
+            shp, force_white=is_divider, force_not_bold=is_divider
+        )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -576,35 +822,33 @@ def generate_restatement(bullets: str, question_context: str | None = None) -> s
     """Generate a one-line chart callout that incorporates the question and editorializes in the client's favor."""
     system = (
         "You are writing a one-line KEY FINDING callout for a professional polling deck. "
+        "CRITICAL: Echo the question in your sentence—weave in what was asked so the finding reads in context. "
         "Write in past tense (e.g., '32% said' not '32% say'). "
-        "Write in a slightly less formal, conversational tone. "
-        "Incorporate the question context into your sentence so the finding reads in context. "
-        "Editorialize subtly in the client's favor where appropriate—frame results positively without distorting the data."
+        "Use a slightly less formal, conversational tone. "
+        "Avoid generic phrases like 'the survey showed', 'overall ratings', 'respondents indicated' without the question context. "
+        "Editorialize subtly in the client's favor where appropriate."
     )
 
     question_block = ""
     if question_context and question_context.strip():
         question_block = f"""
-The survey question (echo this context in your summary):
+The survey question (MUST echo this in your summary):
 \"\"\"{question_context.strip()}\"\"\"
 
-Example: If the question is 'In a typical week, how often do you ride the New York City subway or buses?', 
-write something like: 'In a typical week, 32% said they rode the New York City subway or buses 3-4 days per week, and 26% rode 5 or more days per week, 26% rode 1-2 days per week.'
-Do NOT say 'the most common response is X'—instead weave the question context into the sentence.
+GOOD: "In a typical week, 32% said they rode the New York City subway or buses 3-4 days per week, and 26% rode 5 or more days per week."
+BAD: "The survey showed a nearly even split in overall ratings, with about half giving fair or poor assessments."
+BAD: "The most common response was 3-4 days per week."
 """
 
     user = f"""
 Write EXACTLY ONE sentence summarizing these survey results.
 {question_block}
 Rules:
-- Write in past tense (e.g., '32% said they rode...' not '32% say they ride...')
-- Incorporate the question context into your sentence (e.g. 'In a typical week, 32% said they rode...')
-- Use a slightly less formal, conversational tone
-- Lead with the top results and percentages
-- Editorialize subtly in the client's favor where the data supports it
-- Maximum 35 words
-- Do NOT invent numbers—use only the percentages given
-- Do NOT use stiff phrases like 'the most common response is' or 'respondents indicated that'
+- ECHO the question: start with the question context (e.g., "In a typical week, 32% said they rode...", "When asked about favorability, 60% said...")
+- NO generic language: avoid "the survey showed", "overall ratings", "respondents indicated", "the most common response is"
+- Write in past tense. Use a slightly less formal tone.
+- Lead with the top results and percentages. Editorialize subtly in the client's favor.
+- Maximum 35 words. Do NOT invent numbers.
 
 Survey results:
 {bullets}
@@ -622,8 +866,10 @@ def generate_questions_asked_content(section_name: str, question_texts: dict) ->
 
     system = (
         "You are a political survey analyst writing for senior decision-makers. "
-        "Explain, in analytic language, what this section of the survey measured and why it mattered. "
-        "Write in past tense. Do NOT restate the exact question wording; summarize concepts."
+        "Describe what we were trying to learn and what questions we asked. "
+        "Focus on the TOPICS and CONCEPTS, not methodology. "
+        "Write in plain language—avoid technical jargon like 'scaled responses', 'frequency-based items', 'measurement refinement'. "
+        "Write in past tense."
     )
     user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
 
@@ -632,18 +878,16 @@ Section name: "{section_name}"
 Questions in this section (IDs and abbreviated text):
 {q_list}
 
-Write 5–6 bullet points that follow THIS conceptual sequence:
-1. **Section purpose** – what this section is designed to measure and why (high-level intent).
-2. **Measurement approach** – how the questions collectively capture that concept (dimensions/topics being probed).
-3. **Measurement refinement** – how scales, frequency, intensity, or framing sharpen interpretation (e.g., strength of feeling, tradeoffs, behavior vs attitude).
-4. **Analytical importance** – why these questions matter for understanding voters/respondents in this context.
-5. **Segmentation value** – how responses enable segmentation (e.g., by attitudes, behavior, intensity, demographics).
-6. **Context for later findings** – how these questions set up or contextualize findings that appear later in the deck.
+Write 5–6 bullet points that describe:
+1. **What we were trying to learn** – the topics, concepts, or issues we explored (e.g., favorability, ridership patterns, voter concerns).
+2. **What questions we asked** – summarize the substance of the questions in plain language (e.g., "We asked about transit use and how often people ride the subway").
+3. **Why it matters** – how the answers help inform strategy or decisions.
+4. **What to expect** – how these findings set up what appears in the next slides.
 
 Guidelines:
-- Write in past tense (e.g., 'This section measured...' not 'This section measures...').
-- Focus on analytic **content structure**, not formatting. Write each bullet as a short narrative sentence that explains the concept—not a fragment or survey-question label.
-- NO numeric values. NEVER use question numbers (Q7, Q10, etc.); use the question topic/concept instead so readers do not need to look at question slides.
+- Write in past tense. Use plain, conversational language.
+- NO technical jargon: avoid "scaled responses", "frequency-based items", "measurement refinement", "dimensions/topics being probed".
+- NO numeric values. NEVER use question numbers (Q7, Q10, etc.); use the question topic/concept instead.
 - Write as clean bullet points (start each line with "• ").
 - Keep total length under 900 characters."""
 
@@ -668,9 +912,10 @@ def generate_survey_responses_content(section_name: str, question_texts: dict,
 
     system = (
         "You are a political survey analyst preparing executive briefing slides. "
-        "Summarize survey RESULTS in a structured, analytic way for senior readers. "
-        "Write in past tense (e.g., 'respondents said', 'the survey showed', '60% indicated'). "
-        "Stay strictly faithful to the numbers provided."
+        "Summarize survey RESULTS by echoing what was asked in each finding. "
+        "Every bullet must weave in the question context—e.g., 'When asked about X, 60% said Y' NOT 'The survey showed a nearly even split'. "
+        "Avoid generic phrases like 'overall ratings', 'respondents gave fair or poor assessments' without saying what was asked. "
+        "Write in past tense. Stay strictly faithful to the numbers provided."
     )
     user = f"""You are preparing a transition slide for the "{section_name}" section of a survey deck.
 
@@ -680,17 +925,18 @@ Data for this section (per question, with top answer options and percentages).
 The [Q7], [Q10] etc. IDs are for your reference only—do NOT include them in your output.
 {data_summary}
 
-Write 5–6 bullet points that follow THIS conceptual sequence:
-1. **Topline pattern** – what the results broadly show in this section (e.g., overall support, divide, concern).
-2. **Key comparisons** – how major options or items compare (leaders vs laggards, strongest vs weakest responses).
-3. **Intensity and distribution** – where responses are concentrated (e.g., strong vs soft support, extremes vs middle).
-4. **Segment or subgroup differences (if implied by options)** – call out any clear splits between types of responses (e.g., positive vs negative, incumbents vs challengers, economic vs social issues).
-5. **Implications for interpretation** – what these patterns mean for how to read this section (e.g., mandate strength, vulnerability, momentum).
-6. **Forward-looking context** – how these results will inform later sections, messaging, or strategy.
+Write 5–6 bullet points. CRITICAL: Each bullet must ECHO what was asked.
+
+GOOD: "When asked to rate their transit experience, 65% said good or excellent and 35% said fair or poor."
+BAD: "The survey showed a nearly even split in overall ratings, with about half giving fair or poor assessments."
+
+GOOD: "When asked about favorability of Tom Malinowski, 60% said very or somewhat favorable."
+BAD: "Respondents gave mixed assessments across the board."
 
 Guidelines:
-- Write in past tense (e.g., 'respondents said', 'the survey showed', '60% indicated').
-- CRITICAL – NO QUESTION NUMBERS: NEVER write Q7, Q10, Q9, or any question IDs. Readers must NOT need to look at question slides. ALWAYS use the question context instead: e.g., "When asked about favorability of Tom Malinowski, 60% said very favorable" NOT "60% in Q10 said very favorable". Weave in what was asked (the topic, figure, or concept) so the text stands alone.
+- EVERY bullet must weave in the question context. Start with "When asked about...", "Regarding...", or similar so readers know what was asked.
+- NO generic language: avoid "the survey showed", "overall ratings", "respondents indicated" without the question context.
+- NO question numbers (Q7, Q10). Use the topic/concept from the question text.
 - Use key percentages from the data where helpful (e.g., “around 6 in 10”, or explicit % when clear).
 - Do NOT invent any new numbers or options beyond what appears in the data summary above.
 - Write as clean bullet points (start each line with "• ").
@@ -720,10 +966,9 @@ def generate_multi_question_summary_content(section_name: str, question_texts: d
     system = (
         "You are a political survey analyst preparing executive briefing slides. "
         "Write a summary slide for a multi-question slide: what we asked and what we concluded. "
-        "Write in past tense (e.g., 'we asked', 'respondents said', 'the survey showed'). "
-        "Use a slightly less formal, conversational tone. "
-        "Incorporate the question context into your sentences so findings read in context. "
-        "Stay strictly faithful to the numbers provided."
+        "EVERY bullet must echo what was asked—weave in the question context (e.g., 'When asked about X, 60% said Y'). "
+        "Avoid generic language like 'the survey showed' or 'respondents indicated' without the question context. "
+        "Write in past tense. Use a slightly less formal tone. Stay strictly faithful to the numbers."
     )
     user = f"""You are preparing a summary slide for a multi-question slide in the "{section_name}" section.
 
@@ -745,3 +990,169 @@ Write 4–6 bullet points that:
 
     out = call_llm(system, user)
     return _strip_question_ids(out)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Executive Summary
+# ═══════════════════════════════════════════════════════════
+
+DEFAULT_EXEC_SUMMARY_PROMPT = """You are writing a 10-15-slide executive summary for a PowerPoint about a public opinion survey. The audience is senior decision-makers.
+
+The executive summary needs to provide a high-level summary of the key findings from the survey research as well as providing actionable insights in terms of what the data means and what actions should be taken based on the findings of the survey. The executive summary should end with 1 page of strategic recommendations that are based on the research finding and are tangible next steps that should be taken.
+
+Use this structure:
+1) Goals/objectives (1 slide) – what did we seek to accomplish with the surveying?
+2) Narrative in One Slide (1 slide) – what is the high-level elevator pitch of what should be the strategic pathway forward?
+3) Main conclusions by theme (7-12 slides) – require that every theme slide ends in an implication. That's what turns polling into strategy.
+4) Key Themes to drive (1 slide) – no need to present more data – what are the key themes that emerge from the survey that are on people's minds?
+5) Strategy & tactics (2 slides)
+
+Rules:
+- Each slide must have: Slide title (conclusion headline) + 3-6 bullets.
+- Keep slide titles to 8-9 words maximum so they fit on one line.
+- Every theme slide must include: Insight → proof (2-4 stats) → implication.
+- Use plain language. Avoid methodological jargon unless necessary.
+- Keep it persuasive: tell a story arc that leads to clear actions.
+- Write in the voice of a strategic pollster: confident, concise, practical. No hype.
+- Write in past tense.
+- NEVER use question numbers (Q7, Q10, etc.) – use the question topic/concept instead.
+- Replace long dashes (—) with regular hyphens (-) or commas."""
+
+
+def generate_executive_summary_slides(
+    goals_text: str,
+    sections_data: list[dict],
+    ai_long: pd.DataFrame,
+    summaries_text: str | None = None,
+) -> list[dict]:
+    """
+    Generate 12-15 executive summary slides.
+    Uses summaries_text (chart callouts, transition slides, multi-q summaries) when provided.
+    Returns list of {"title": str, "bullets": list[str]}.
+    """
+    # Primary input: pre-generated summaries from the deck (chart callouts, transition slides, multi-q)
+    if summaries_text and summaries_text.strip():
+        data_block = f"""PRE-GENERATED SUMMARIES FROM THIS DECK (use these as your primary source; synthesize and elevate):
+{summaries_text}
+"""
+    else:
+        data_block = ""
+
+    # Fallback: raw survey data by section (when summaries unavailable)
+    data_parts = []
+    for sec in sections_data:
+        name = sec.get("name", "")
+        q_data = sec.get("questions", {})
+        q_texts = q_data.get("question_texts", {})
+        q_ids = q_data.get("question_ids", [])
+        question_data = q_data.get("question_data", pd.DataFrame())
+        if question_data.empty and "question_id" in ai_long.columns:
+            question_data = ai_long[ai_long["question_id"].isin(q_ids)].copy()
+        lines = [f"Section: {name}"]
+        for qid, text in q_texts.items():
+            qrows = question_data[question_data["question_id"] == qid] if not question_data.empty else pd.DataFrame()
+            if qrows.empty:
+                qrows = ai_long[ai_long["question_id"] == qid]
+            top = qrows.sort_values("pct", ascending=False).head(3) if not qrows.empty else pd.DataFrame()
+            vals = "; ".join([f"{r['answer_option'].strip()} – {r['pct']:.0f}%" for _, r in top.iterrows()]) if not top.empty else "no data"
+            lines.append(f"  - Question: {text[:120]}...")
+            lines.append(f"    Top results: {vals}")
+        data_parts.append("\n".join(lines))
+    survey_data_summary = "\n\n".join(data_parts)
+
+    system = (
+        "You are a strategic pollster writing an executive summary for senior decision-makers. "
+        "Output MUST follow the exact format below. Each slide block starts with '=== SLIDE N: Type ===' "
+        "then 'Title: [conclusion headline]' on the next line, then bullet points each starting with '• '."
+    )
+    user = f"""{DEFAULT_EXEC_SUMMARY_PROMPT}
+
+SPECIFIC GOALS OF THIS SURVEY:
+{goals_text}
+
+{data_block}
+SURVEY DATA (by section, for reference):
+{survey_data_summary}
+
+OUTPUT FORMAT – use EXACTLY this structure. Output 12-15 slides.
+
+=== SLIDE 1: Goals ===
+Title: [Your conclusion headline for goals - max 8-9 words]
+• [bullet 1]
+• [bullet 2]
+• [bullet 3]
+
+=== SLIDE 2: Narrative ===
+Title: [Your elevator pitch headline - max 8-9 words]
+• [bullet 1]
+• [bullet 2]
+...
+
+=== SLIDE 3: Theme 1 ===
+Title: [Conclusion headline for first theme - max 8-9 words]
+• [Insight]
+• [Proof with 2-4 stats]
+• [Implication – what to do next]
+
+... (continue for 7-12 theme slides, one per major section/finding)
+
+=== SLIDE N: Key Themes ===
+Title: [Headline]
+• [theme 1]
+• [theme 2]
+...
+
+=== SLIDE N+1: Strategy ===
+Title: [Headline]
+• [tactic 1]
+• [tactic 2]
+...
+
+=== SLIDE N+2: Tactics ===
+Title: [Headline]
+• [tactic 1]
+• [tactic 2]
+...
+
+Generate the full executive summary now. Synthesize and elevate the pre-generated summaries when provided; otherwise use the survey data. No question numbers."""
+
+    out = call_llm(system, user, temperature=0.3)
+    out = _strip_question_ids(out)
+    # Replace em dashes with regular hyphen
+    out = out.replace("—", "-")
+
+    return _parse_executive_summary_output(out)
+
+
+def _parse_executive_summary_output(text: str) -> list[dict]:
+    """Parse LLM output into list of {title, bullets}. Use structure titles so readers understand purpose."""
+    raw_slides = []
+    blocks = re.split(r"=== SLIDE \d+[^=]*===", text, flags=re.IGNORECASE)
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        bullets = []
+        for line in block.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("title:"):
+                pass
+            elif line.startswith("•") or line.startswith("-") or line.startswith("*"):
+                bullets.append(line.lstrip("•-* ").strip())
+        if bullets:
+            raw_slides.append({"bullets": bullets})
+    raw_slides = raw_slides[:15]
+    # Assign structure titles: Goals → Narrative → Theme 1..N → Key Themes → Strategy → Tactics
+    n = len(raw_slides)
+    if n == 0:
+        return []
+    num_themes = max(0, n - 5)  # 5 fixed: Goals, Narrative, Key Themes, Strategy, Tactics
+    titles = ["Goals/objectives", "Narrative in One Slide"]
+    titles.extend(f"Theme {i + 1}" for i in range(num_themes))
+    titles.extend(["Key Themes to drive", "Strategy", "Tactics"])
+    titles = titles[:n]  # Trim if fewer slides
+    while len(titles) < n:
+        titles.append(f"Theme {len(titles) - 1}")
+    return [{"title": titles[i], "bullets": raw_slides[i]["bullets"]} for i in range(n)]

@@ -176,15 +176,17 @@ def process_slide(slide, ai_long, key_style, top_k=3, exclude_net=True):
         bullets.append(f"- {opt} – {pct}%")
     bullet_text = "\n".join(bullets)
 
-    # Get question context for echoing in the summary
+    # Get question context for echoing in the summary (combine for multi-question)
     question_context = None
+    qtexts = []
     for qid in qids:
         rows = ai_long[ai_long["question_id"] == qid]
         if not rows.empty:
             qt = rows.iloc[0].get("question_text", "") if "question_text" in rows.columns else ""
             if pd.notna(qt) and str(qt).strip():
-                question_context = str(qt).strip()
-                break
+                qtexts.append(str(qt).strip())
+    if qtexts:
+        question_context = " | ".join(qtexts[:3]) if len(qtexts) > 1 else qtexts[0]
 
     # Generate restatement (incorporates question, less formal, editorializes)
     try:
@@ -239,16 +241,13 @@ def main():
             qids = get_question_ids(qspec)
             is_multi = qspec[0] == "range" or len(qids) > 1
             if is_multi:
-                # Multi-question: remove placeholder only; summary goes on separate slide (Pass 3)
-                removed = False
-                for shape in slide.shapes:
-                    if shape.has_text_frame and PLACEHOLDER in shape.text_frame.text:
-                        new_text = shape.text_frame.text.replace(PLACEHOLDER, "").strip()
-                        shape.text_frame.text = new_text if new_text else ""
-                        removed = True
-                if removed:
-                    print(f"Slide {i + 1}: Removed placeholder from multi-question slide {qids}")
+                # Multi-question: add one-line summary (like single-question); Pass 3 adds full summary slide before this
+                print(f"Slide {i + 1}: Processing multi-question {qids} (one-line summary + full summary slide)...")
+                if process_slide(slide, ai_long, key_style, top_k=args.top_k, exclude_net=args.exclude_net):
+                    print(f"  [OK] One-line summary added")
                     updated += 1
+                else:
+                    print(f"  [SKIP] No values shape found or LLM failed")
                 continue
             if slide_has_table(slide):
                 print(f"Slide {i + 1}: Skipping {qids} (slide has table — no summary sentence)")

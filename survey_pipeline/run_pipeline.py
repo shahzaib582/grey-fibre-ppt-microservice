@@ -52,15 +52,18 @@ def run_pass2(data_path, pptx_path, out_path, top_k=3):
     pass2_main()
 
 
-def run_pass3(data_path, pptx_path, out_path):
-    """Run Pass 3: Generate transition slides."""
+def run_pass3(data_path, pptx_path, out_path, exec_summary_goals=None):
+    """Run Pass 3: Generate transition slides and executive summary."""
     from survey_pipeline.pass3_transition_slides import main as pass3_main
-    sys.argv = [
+    cmd = [
         "pass3_transition_slides.py",
         "--data", data_path,
         "--pptx", pptx_path,
         "--out", out_path,
     ]
+    if exec_summary_goals:
+        cmd.extend(["--exec-summary-goals", exec_summary_goals])
+    sys.argv = cmd
     pass3_main()
 
 
@@ -224,6 +227,7 @@ Examples:
     ap.add_argument("--pptx", required=True, help="Path to PowerPoint template")
     ap.add_argument("--out", required=True, help="Final output file path")
     ap.add_argument("--passes", default="1,2,3", help="Comma-separated pass numbers to run (default: 1,2,3)")
+    ap.add_argument("--exec-summary-goals", default=None, help="Path to file with survey goals for executive summary")
     ap.add_argument("--top-k", type=int, default=3, help="Number of top answers per question")
     ap.add_argument("--pct-decimals", type=int, default=0, help="Decimal places for percentages")
     ap.add_argument("--keep-intermediates", action="store_true", help="Keep intermediate files")
@@ -303,7 +307,7 @@ Examples:
             else:
                 pass3_out = os.path.join(temp_dir, "output_pass3.pptx")
                 print("\n" + "-" * 60)
-                run_pass3(args.data, current_pptx, pass3_out)
+                run_pass3(args.data, current_pptx, pass3_out, exec_summary_goals=args.exec_summary_goals)
                 current_pptx = pass3_out
 
                 if args.keep_intermediates:
