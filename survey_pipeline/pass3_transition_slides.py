@@ -38,7 +38,6 @@ from .utils import (
     generate_multi_question_summary_content,
     generate_executive_summary_slides,
     extract_chart_callouts_from_deck,
-    normalize_slide_numbers,
     call_llm,
     ensure_key_finding_style,
     apply_style_to_run,
@@ -824,12 +823,8 @@ def main():
     # Step 3: Replace "Key Findings" with section name on all slides in each section
     _replace_key_findings_with_section(prs)
 
-    # Step 3.5: Normalize slide numbers (Arial 14pt, same position as grey slides)
-    try:
-        normalize_slide_numbers(prs, ref_slide=keyfinding_slide)
-        print("Normalized slide numbers (Arial 14pt, consistent position)")
-    except Exception as e:
-        print(f"[WARN] Slide number normalization skipped: {e}")
+    # Step 3.5: Skip normalize_slide_numbers—copying placeholders between slides can corrupt PPTX.
+    # Layout-provided placeholders are left as-is; new slides without placeholders stay without.
 
     # Step 4: Save
     prs.save(args.out)
